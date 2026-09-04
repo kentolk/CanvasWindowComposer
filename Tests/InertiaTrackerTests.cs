@@ -169,4 +169,66 @@ public class InertiaTrackerTests
 
         Assert.True(tracker.Release());
     }
+
+    [Fact]
+    public void Tick_AccumulatesSubPixelMotionInsteadOfDroppingIt()
+    {
+        var clock = new FakeClock();
+        var tracker = new InertiaTracker(clock);
+
+        // ~0.0625 px/ms: above the 0.02 stop threshold, but a 1ms tick yields
+        // 0.0625px, which rounds to zero. Without a carried residual the tracker
+        // reports "still moving" while emitting nothing but zeros.
+        tracker.RecordDelta(1, 1);
+        clock.Advance(16);
+        tracker.RecordDelta(1, 1);
+        Assert.True(tracker.Release());
+
+        int totalX = 0, totalY = 0;
+        for (int i = 0; i < 40; i++)
+        {
+            clock.Advance(1);
+            var (dx, dy, stopped) = tracker.Tick();
+            totalX += dx;
+            totalY += dy;
+            if (stopped) break;
+        }
+
+        Assert.True(totalX > 0, $"expected accumulated x motion, got {totalX}");
+        Assert.True(totalY > 0, $"expected accumulated y motion, got {totalY}");
+    }
+
+    [Fact]
+    public void Tick_ConservesTotalDisplacementAcrossFrameRates()
+    {
+        // The same fling sampled at 1ms and at 16ms should travel comparable
+        // distance — displacement is the integral of velocity, so it must not
+        // depend on how finely the caller ticks.
+        static int RunAt(long stepMs)
+        {
+            var clock = new FakeClock();
+            var tracker = new InertiaTracker(clock);
+            for (int i = 0; i < 5; i++)
+            {
+                tracker.RecordDelta(10, 0);
+                clock.Advance(16);
+            }
+            tracker.Release();
+
+            int total = 0;
+            for (int i = 0; i < 4000; i++)
+            {
+                clock.Advance(stepMs);
+                var (dx, _, stopped) = tracker.Tick();
+                total += dx;
+                if (stopped) break;
+            }
+            return total;
+        }
+
+        int fine = RunAt(1);
+        int coarse = RunAt(16);
+
+        Assert.InRange(fine, coarse - 12, coarse + 12);
+    }
 }

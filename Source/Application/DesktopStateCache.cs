@@ -32,7 +32,7 @@ internal sealed class DesktopStateCache
         vds.DesktopChanged += OnDesktopChanged;
     }
 
-    private void OnDesktopChanged()
+    private void OnDesktopChanged(Guid newDesktopId)
     {
         _overview.CancelInertia();
 
@@ -42,7 +42,7 @@ internal sealed class DesktopStateCache
             _wm.Reset();
         }
 
-        _lastDesktopId = _vds.CurrentDesktopId;
+        _lastDesktopId = newDesktopId;
 
         if (_states.TryGetValue(_lastDesktopId, out var state))
             _canvas.LoadState(state);

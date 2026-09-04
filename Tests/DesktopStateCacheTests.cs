@@ -28,6 +28,7 @@ public class DesktopStateCacheTests
 
     private static readonly Guid GuidA = new("aaaaaaaa-0000-0000-0000-000000000001");
     private static readonly Guid GuidB = new("bbbbbbbb-0000-0000-0000-000000000002");
+    private static readonly Guid GuidC = new("cccccccc-0000-0000-0000-000000000003");
 
     [Fact]
     public void Switch_FromEmptyInitial_DoesNotResetWmOrSaveState()
@@ -126,5 +127,27 @@ public class DesktopStateCacheTests
         // WM.Reset clears the canvas window map (each desktop's windows are
         // re-discovered after the switch).
         Assert.Empty(h.Canvas.Windows);
+    }
+
+    [Fact]
+    public void Switch_UsesNotifiedDesktopIdNotTheLatestPolledOne()
+    {
+        var h = new Harness(initialDesktop: GuidA);
+        h.Canvas.SetCamera(111, 222);
+
+        // Two switches land inside one poll interval: the notification says we
+        // moved to B, but the service has already detected C. Keying off the
+        // property here files B's canvas under C and loses it.
+        h.Vds.RaiseStaleSwitch(notifiedId: GuidB, currentId: GuidC);
+
+        h.Canvas.SetCamera(333, 444);   // this is B's canvas
+
+        h.Vds.SwitchTo(GuidA);          // saves B's canvas under B, restores A
+        Assert.Equal(111, h.Canvas.CamX);
+        Assert.Equal(222, h.Canvas.CamY);
+
+        h.Vds.SwitchTo(GuidB);          // B's canvas must still be there
+        Assert.Equal(333, h.Canvas.CamX);
+        Assert.Equal(444, h.Canvas.CamY);
     }
 }

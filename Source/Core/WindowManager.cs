@@ -28,6 +28,15 @@ internal sealed class WindowManager : IDisposable
     // Windows with clipped (empty) region to prevent them from fighting off-screen
     private readonly HashSet<IntPtr> _clippedWindows = new();
 
+    // Windows currently projected outside every monitor.
+    //
+    // Tracked so we can nudge one to repaint when it comes back. Chromium and
+    // Gecko both suspend compositing for windows they consider off-screen, and
+    // a window resized while suspended returns with a surface still sized to the
+    // old rect - it renders as a blank band or a half-drawn window until
+    // something invalidates it. Nothing else in the pipeline does.
+    private readonly HashSet<IntPtr> _offScreen = new();
+
     private long _lastReprojectTick;
 
     // Temporarily suspends greedy draw (SetWindowRgn clipping)
@@ -198,12 +207,16 @@ internal sealed class WindowManager : IDisposable
     /// </summary>
     public void Reproject(bool isAsync = false, bool isTransient = false)
     {
-        var batch = BuildReprojectBatch();
+        var batch = BuildReprojectBatch(out var returning);
 
         if (_projection != null)
             _projection.Schedule(batch, isAsync: isAsync, isTransient: isTransient);
         else
             _win32.BatchMove(batch, isAsync: isAsync, isTransient: isTransient);
+
+        // After the move, so the repaint lands at the new position rather than
+        // the off-screen one the window is leaving.
+        InvalidateAll(returning);
     }
 
     /// <summary>
@@ -216,14 +229,37 @@ internal sealed class WindowManager : IDisposable
     /// </summary>
     public void ReprojectSync(bool isAsync = false, bool isTransient = false)
     {
-        _projection?.ClearPending();
-        var batch = BuildReprojectBatch();
+        // Whatever we just cancelled had already been written into _lastScreen,
+        // so on an interrupted batch that bookkeeping describes moves that never
+        // happened and the "already there" skip below would drop every one of
+        // them — leaving the canvas model at the new camera and the real windows
+        // at the old one.
+        bool interrupted = _projection?.ClearPending() ?? false;
+        var batch = BuildReprojectBatch(out var returning, force: interrupted);
         _win32.BatchMove(batch, isAsync: isAsync, isTransient: isTransient);
+        InvalidateAll(returning);
+
     }
 
     private List<BatchMoveItem> BuildReprojectBatch()
     {
+        return BuildReprojectBatch(out _);
+    }
+
+    /// <param name="force">
+    /// Include windows whose <see cref="_lastScreen"/> entry already matches the
+    /// projection. Only for callers that know that record is unreliable.
+    /// </param>
+    private List<BatchMoveItem> BuildReprojectBatch(out List<IntPtr> returning, bool force = false)
+    {
         var batch = new List<BatchMoveItem>();
+        returning = new List<IntPtr>();
+
+        // Monitor layout can't change mid-batch, and every lookup goes through
+        // Screen.AllScreens -> EnumDisplayMonitors plus two array allocations.
+        // Querying it once per window made pan cost scale with window count for
+        // data that only changes on DisplaySettingsChanged.
+        IReadOnlyList<(int x, int y, int w, int h)> screens = _win32.GetScreenWorkingAreas();
 
         foreach (var (hWnd, world) in _canvas.Windows)
         {
@@ -231,7 +267,16 @@ internal sealed class WindowManager : IDisposable
                 continue;
 
             var r = _canvas.WorldToScreen(world);
-            bool onScreen = IsOnAnyScreen(r.X, r.Y, r.W, r.H);
+            bool onScreen = IsOnAnyScreen(screens, r.X, r.Y, r.W, r.H);
+
+            if (!onScreen)
+            {
+                _offScreen.Add(hWnd);
+            }
+            else if (_offScreen.Remove(hWnd))
+            {
+                returning.Add(hWnd);
+            }
 
             bool wasClipped = _clippedWindows.Contains(hWnd);
             if (!_config.DisableGreedyDraw && !SuspendGreedyDraw && !onScreen)
@@ -240,10 +285,11 @@ internal sealed class WindowManager : IDisposable
                 {
                     _win32.ClipWindow(hWnd);
                     _clippedWindows.Add(hWnd);
-                    var (px, py) = ClampToScreenEdge(r.X, r.Y, r.W, r.H);
+                    var (px, py) = ClampToScreenEdge(screens, r.X, r.Y, r.W, r.H);
                     var clipped = new WindowRect(px, py, r.W, r.H);
                     batch.Add(new BatchMoveItem(hWnd, clipped, PosOnly: true));
-                    _lastScreen[hWnd] = (px, py, r.W, r.H);
+                    _lastScreen[hWnd] = WithKnownSize(hWnd, px, py, r);
+
                 }
                 continue;
             }
@@ -254,15 +300,88 @@ internal sealed class WindowManager : IDisposable
                 _clippedWindows.Remove(hWnd);
             }
 
+            // Skip windows already where we want them. Every entry here becomes
+            // a cross-process SetWindowPos that sends WM_WINDOWPOSCHANGING /
+            // CHANGED synchronously to the owning thread, so the UI thread
+            // blocks on each one — a commit that moves nothing still cost a
+            // round trip per window, and a busy app stalled the whole canvas.
+            // The navigation glide ends with exactly such a commit, since the
+            // projection worker already applied those positions.
+            if (!force && _lastScreen.TryGetValue(hWnd, out var prev) && prev.x == r.X && prev.y == r.Y)
+                continue;
+
             batch.Add(new BatchMoveItem(hWnd, r, PosOnly: true));
-            _lastScreen[hWnd] = (r.X, r.Y, r.W, r.H);
+            _lastScreen[hWnd] = WithKnownSize(hWnd, r.X, r.Y, r);
+
+
         }
 
         return batch;
     }
 
     /// <summary>
+    /// Position for <see cref="_lastScreen"/> after a move-only projection.
+    ///
+    /// The batch passes SWP_NOSIZE, so the window's size did not change and the
+    /// entry has to keep whatever size we last knew it to be. Recording the
+    /// projected size instead makes <see cref="ReconcileWindow"/> compare the
+    /// real window against a size that was never applied, read the difference as
+    /// a user resize, and write the old size back over the canvas — which is
+    /// what made a grid layout collapse back to the original sizes on the first
+    /// pan after arranging it.
+    /// </summary>
+    private (int x, int y, int w, int h) WithKnownSize(IntPtr hWnd, int x, int y, WindowRect projected)
+    {
+        return _lastScreen.TryGetValue(hWnd, out var known)
+            ? (x, y, known.w, known.h)
+            : (x, y, projected.W, projected.H);
+    }
+
+    /// <summary>
+    /// Push both position AND size of every canvas window to the real windows.
+    ///
+    /// Ordinary reprojection is deliberately move-only: panning must never
+    /// resize anything. A layout change is the one case where the canvas's world
+    /// size is authoritative and has to be applied — otherwise the grid exists
+    /// only in the model and the minimap, and the real windows keep whatever
+    /// size they happened to have.
+    /// </summary>
+    public void ApplyLayout(IntPtr? only = null)
+    {
+        // A queued move-only batch would land after ours and undo half of it.
+        _projection?.ClearPending();
+
+        var batch = new List<BatchMoveItem>();
+        foreach (var (hWnd, world) in _canvas.Windows)
+        {
+            if (only.HasValue && hWnd != only.Value)
+                continue;
+            if (world.State != WindowState.Normal || world.PinnedToScreen)
+                continue;
+            batch.Add(new BatchMoveItem(hWnd, _canvas.WorldToScreen(world), PosOnly: false));
+        }
+
+        _win32.BatchMove(batch, isAsync: false, isTransient: false);
+
+        // Read back what actually happened. An app with a minimum size, a fixed
+        // aspect ratio, or a size grip it refuses to give up will not take the
+        // rect we asked for, and _lastScreen has to hold the truth or the next
+        // Reconcile reads the shortfall as a user resize.
+        foreach (var item in batch)
+        {
+            var (ax, ay, aw, ah) = _win32.GetWindowRect(item.HWnd);
+            _lastScreen[item.HWnd] = (ax, ay, aw, ah);
+
+            // A resize is precisely the case that strands a suspended renderer
+            // with a surface sized to the old rect.
+            _win32.InvalidateWindow(item.HWnd);
+        }
+
+    }
+
+    /// <summary>
     /// Project a single window (e.g., after restore from minimized).
+
     /// Returns true if the window was reprojected, false if skipped.
     /// </summary>
     public bool ReprojectWindow(IntPtr hWnd)
@@ -282,10 +401,20 @@ internal sealed class WindowManager : IDisposable
 
         var r = _canvas.WorldToScreen(world);
 
-        _win32.SetWindowPosition(hWnd, r.X, r.Y, r.W, r.H,
-            (uint)(SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE));
+        // Move only, never resize. WorldToScreen applies Canvas's minimum-size
+        // floor (MinWindowWidth/MinWindowHeight), which is meaningful inside the
+        // canvas model but must not be pushed onto a real window — a genuinely
+        // small window would be inflated to 200x100 every time it was restored
+        // from minimize or changed maximize state. The batch path already avoids
+        // this via PosOnly -> SWP_NOSIZE; match it, and keep _lastScreen tracking
+        // the real size so Reconcile doesn't read the floor as a user resize.
+        var (_, _, actualW, actualH) = _win32.GetWindowRect(hWnd);
 
-        _lastScreen[hWnd] = (r.X, r.Y, r.W, r.H);
+        _win32.SetWindowPosition(hWnd, r.X, r.Y, actualW, actualH,
+            (uint)(SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE |
+                   SET_WINDOW_POS_FLAGS.SWP_NOSIZE));
+
+        _lastScreen[hWnd] = (r.X, r.Y, actualW, actualH);
         return true;
     }
 
@@ -361,12 +490,21 @@ internal sealed class WindowManager : IDisposable
             RemoveWindow(hWnd);
     }
 
+    private void InvalidateAll(List<IntPtr> windows)
+    {
+        foreach (var hWnd in windows)
+            _win32.InvalidateWindow(hWnd);
+    }
+
     /// <summary>Drop a single window from canvas and internal tracking.</summary>
+
     public void RemoveWindow(IntPtr hWnd)
     {
         _canvas.RemoveWindow(hWnd);
         _lastScreen.Remove(hWnd);
         _clippedWindows.Remove(hWnd);
+        _offScreen.Remove(hWnd);
+
     }
 
     /// <summary>Restore regions on all clipped windows (for overview thumbnails).</summary>
@@ -389,23 +527,49 @@ internal sealed class WindowManager : IDisposable
     /// Aero Snap or screen recorders can leave stray clip regions on windows
     /// we never registered) and clear any window region + force a full repaint.
     /// </summary>
-    public unsafe void RefreshAllWindows()
+    public void RefreshAllWindows()
     {
         _clippedWindows.Clear();
+        _offScreen.Clear();
+
         _win32.EnumWindows(hWnd =>
         {
             if (_win32.IsWindowVisible(hWnd))
             {
                 _win32.UnclipWindow(hWnd);
-                PInvoke.RedrawWindow((HWND)hWnd, null, (HRGN)IntPtr.Zero,
-                    REDRAW_WINDOW_FLAGS.RDW_INVALIDATE | REDRAW_WINDOW_FLAGS.RDW_ERASE |
-                    REDRAW_WINDOW_FLAGS.RDW_FRAME | REDRAW_WINDOW_FLAGS.RDW_ALLCHILDREN);
+                _win32.InvalidateWindow(hWnd);
+
             }
             return true;
         });
     }
 
+    /// <summary>
+    /// Whether a window should take part in grid layout.
+    ///
+    /// Being on the canvas and belonging in a grid cell are different questions.
+    /// A dialog — "rename branch", a settings sheet — should still pan with
+    /// everything else, but giving it a full screen-sized cell of its own strands
+    /// it away from the window it belongs to. Two signals rule those out:
+    /// an owner window, and the absence of WS_THICKFRAME (a fixed-size window
+    /// cannot fill a cell even if we ask it to).
+    /// </summary>
+    public bool IsGridEligible(IntPtr hWnd)
+    {
+        if (_win32.GetWindowOwner(hWnd) != IntPtr.Zero)
+            return false;
+
+        int style = _win32.GetWindowStyle(hWnd);
+        return (style & (int)WINDOW_STYLE.WS_THICKFRAME) != 0;
+    }
+
+    /// <summary>Raised after a newly discovered window is fully registered.</summary>
+
+
+    public event Action<IntPtr>? WindowRegistered;
+
     /// <summary>Register a new window into the canvas from its screen position.</summary>
+
     public void RegisterWindow(IntPtr hWnd)
     {
         uint ownPid = (uint)Environment.ProcessId;
@@ -416,7 +580,14 @@ internal sealed class WindowManager : IDisposable
 
         _canvas.SetWindowFromScreen(hWnd, sx, sy, sw, sh);
         _lastScreen[hWnd] = (sx, sy, sw, sh);
+
+        // Fired only once the canvas entry AND _lastScreen are both seeded.
+        // Anything that repositions a new window has to run after this point,
+        // or the seeding below would overwrite _lastScreen with the window's
+        // pre-move rect and the next Reconcile would drag it back.
+        WindowRegistered?.Invoke(hWnd);
     }
+
 
     public bool SetWindowPinnedToScreen(IntPtr hWnd, bool pinned)
     {
@@ -468,6 +639,7 @@ internal sealed class WindowManager : IDisposable
         _canvas.ResetCamera();
 
         var batch = new List<BatchMoveItem>();
+        IReadOnlyList<(int x, int y, int w, int h)> screens = _win32.GetScreenWorkingAreas();
 
         foreach (var (hWnd, world) in _canvas.Windows)
         {
@@ -477,8 +649,18 @@ internal sealed class WindowManager : IDisposable
                 continue;
 
             var rect = new WindowRect((int)world.X, (int)world.Y, (int)world.W, (int)world.H);
+
+            // World coordinates are unbounded — a window parked in a far grid
+            // cell sits thousands of pixels off-screen. Restoring it there on
+            // exit leaves it invisible and unclickable, with only Alt-Tab to get
+            // it back. Reset means "hand the windows back to the user", so
+            // anything off-screen gets clamped into the nearest monitor.
+            if (!IsOnAnyScreen(screens, rect.X, rect.Y, rect.W, rect.H))
+                rect = MoveIntoNearestScreen(screens, rect);
+
             batch.Add(new BatchMoveItem(hWnd, rect, PosOnly: false));
         }
+
 
         _win32.BatchMove(batch, isAsync: false, isTransient: false);
         _canvas.ClearWindows();
@@ -536,21 +718,27 @@ internal sealed class WindowManager : IDisposable
 
     private WindowRect ResolvePinnedScreenRect(IntPtr hWnd, WorldRect world)
     {
+        IReadOnlyList<(int x, int y, int w, int h)> screens = _win32.GetScreenWorkingAreas();
         var (ax, ay, aw, ah) = _win32.GetWindowRect(hWnd);
         var actual = new WindowRect(ax, ay, aw, ah);
-        if (!_clippedWindows.Contains(hWnd) && IsOnAnyScreen(actual.X, actual.Y, actual.W, actual.H))
+        if (!_clippedWindows.Contains(hWnd) && IsOnAnyScreen(screens, actual.X, actual.Y, actual.W, actual.H))
+
             return actual;
 
-        var projected = _canvas.WorldToScreen(world);
-        if (IsOnAnyScreen(projected.X, projected.Y, projected.W, projected.H))
+        // Take the position from the projection but keep the window's real size.
+        // WorldToScreen applies the canvas minimum-size floor, and pinning is
+        // allowed to move a window into view — not to grow it.
+        var p = _canvas.WorldToScreen(world);
+        var projected = new WindowRect(p.X, p.Y, aw, ah);
+        if (IsOnAnyScreen(screens, projected.X, projected.Y, projected.W, projected.H))
             return projected;
 
-        return MoveIntoNearestScreen(projected);
+        return MoveIntoNearestScreen(screens, projected);
+
     }
 
-    private WindowRect MoveIntoNearestScreen(WindowRect rect)
+    private static WindowRect MoveIntoNearestScreen(IReadOnlyList<(int x, int y, int w, int h)> screens, WindowRect rect)
     {
-        var screens = _win32.GetScreenWorkingAreas();
         (int x, int y, int w, int h) screen = screens.Count > 0
             ? screens[0]
             : (0, 0, FallbackScreenWidth, FallbackScreenHeight);
@@ -586,10 +774,8 @@ internal sealed class WindowManager : IDisposable
     /// Clamp window position so it sits just outside the nearest screen edge.
     /// This hides DWM border/shadow effects that would bleed onto the visible area.
     /// </summary>
-    private (int x, int y) ClampToScreenEdge(int sx, int sy, int sw, int sh)
+    private static (int x, int y) ClampToScreenEdge(IReadOnlyList<(int x, int y, int w, int h)> screens, int sx, int sy, int sw, int sh)
     {
-        var screens = _win32.GetScreenWorkingAreas();
-
         // Find the nearest screen
         int bestDist = int.MaxValue;
         var nearest = screens.Count > 0 ? screens[0] : (0, 0, FallbackScreenWidth, FallbackScreenHeight);
@@ -638,9 +824,10 @@ internal sealed class WindowManager : IDisposable
     }
 
     /// <summary>Check if a rect overlaps with any monitor's working area (excludes taskbars).</summary>
-    private bool IsOnAnyScreen(int rx, int ry, int rw, int rh)
+    private static bool IsOnAnyScreen(IReadOnlyList<(int x, int y, int w, int h)> screens, int rx, int ry, int rw, int rh)
     {
-        foreach (var (left, top, width, height) in _win32.GetScreenWorkingAreas())
+        foreach (var (left, top, width, height) in screens)
+
         {
             int right = left + width;
             int bottom = top + height;

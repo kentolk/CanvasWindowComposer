@@ -27,13 +27,14 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Win32InputRouter _input;
     private readonly DesktopStateCache _desktops;
     private readonly ForegroundCoordinator _foreground;
+    private readonly CanvasNavigator _navigator;
     private bool _enabled = true;
 
     public TrayApp(IClock? clock = null, IScreens? screens = null)
     {
         _clock = clock ?? SystemClock.Instance;
         _screens = screens ?? WinFormsScreens.Instance;
-        _config = new AppConfig(_clock);
+        _config = new AppConfig();
         _config.Load();
         _config.StartObservingChanges();
         GridRenderer.CompileShaders();
@@ -48,9 +49,10 @@ internal sealed class TrayApp : ApplicationContext
         _overview.Warmup();
         _foreground = new ForegroundCoordinator(_canvas, _overview, _input, _clock, _screens);
         _desktops = new DesktopStateCache(_canvas, _wm, _overview, _vds);
+        _navigator = new CanvasNavigator(_canvas, _wm, _input, _screens, _config, _clock);
 
         // Constructed last so they can self-subscribe to canvas/input/desktops events.
-        _minimap = new MinimapOverlay(_canvas, _input, _desktops, _screens);
+        _minimap = new MinimapOverlay(_canvas, _input, _desktops, winApi, _screens);
         _search = new SearchOverlay(_canvas, _wm, winApi, _input, _screens);
 
         _bgTimer = new Timer { Interval = ReconcileTimerIntervalMs };
@@ -65,9 +67,14 @@ internal sealed class TrayApp : ApplicationContext
         {
             Checked = _config.ShowScreenFixedWindowsDuringPan
         };
+        var arrangeGridItem = new ToolStripMenuItem("Arrange in Grid (Ctrl+Alt+G)", null, OnArrangeGrid);
+        var autoGridItem = new ToolStripMenuItem("Auto-Grid New Windows", null, OnToggleAutoGrid)
+        {
+            Checked = _config.AutoGridNewWindows
+        };
         var refreshItem = new ToolStripMenuItem("Refresh", null, OnRefresh);
         var openConfigItem = new ToolStripMenuItem("Open Config Directory", null,
-            (_, _) => System.Diagnostics.Process.Start("explorer.exe", AppConfig.ConfigDir));
+            (_, _) => OpenConfigDirectory());
         var exitItem = new ToolStripMenuItem("Exit", null, OnExit);
 
         var menu = new ContextMenuStrip();
@@ -75,6 +82,8 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(toggleItem);
         menu.Items.Add(showScreenFixedItem);
+        menu.Items.Add(arrangeGridItem);
+        menu.Items.Add(autoGridItem);
         menu.Items.Add(refreshItem);
         menu.Items.Add(openConfigItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -112,9 +121,54 @@ internal sealed class TrayApp : ApplicationContext
             : "Canvas Desktop - Disabled";
     }
 
+    /// <summary>
+    /// Lay every canvas window out in a grid of screen-sized cells, then
+    /// frame the window that was most recently in front so the user keeps
+    /// looking at what they were already looking at.
+    /// </summary>
+    private void OnArrangeGrid(object? sender, EventArgs e)
+    {
+        _navigator.ArrangeGrid();
+    }
+
     private void OnRefresh(object? sender, EventArgs e)
     {
         _wm.RefreshAllWindows();
+    }
+
+    /// <summary>
+    /// Open %APPDATA%\CanvasWindowComposer in Explorer. Uses ArgumentList so the
+    /// path is quoted for us — passing it as a raw argument string breaks for
+    /// any user whose profile name contains a space.
+    /// </summary>
+    private static void OpenConfigDirectory()
+    {
+        try
+        {
+            Directory.CreateDirectory(AppConfig.ConfigDir);
+            var psi = new System.Diagnostics.ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+            psi.ArgumentList.Add(AppConfig.ConfigDir);
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch
+        {
+            // Explorer missing or replaced by a third-party shell — not worth
+            // interrupting the user over.
+        }
+    }
+
+    /// <summary>
+    /// Toggle whether newly opened windows join an existing grid. Persisted to
+    /// config.ini so the tray and the file agree, matching how the pinned /
+    /// fullscreen toggle behaves.
+    /// </summary>
+    private void OnToggleAutoGrid(object? sender, EventArgs e)
+    {
+        bool enabled = !_config.AutoGridNewWindows;
+        _config.SetAutoGridNewWindows(enabled);
+
+        if (sender is ToolStripMenuItem item)
+            item.Checked = enabled;
     }
 
     private void OnToggleScreenFixedWindowsDuringPan(object? sender, EventArgs e)
@@ -135,10 +189,12 @@ internal sealed class TrayApp : ApplicationContext
         _input.Dispose();
         _wm.Reset();
         _wm.Dispose();
+        _navigator.Dispose();
         _overview.Dispose();
         _search.Close();
         _minimap.Close();
         _vds.Dispose();
+        _config.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         Application.Exit();
@@ -169,7 +225,19 @@ internal sealed class TrayApp : ApplicationContext
         g.DrawLine(pen, cx, cy + len, cx - arrow, cy + len - arrow);
         g.DrawLine(pen, cx, cy + len, cx + arrow, cy + len - arrow);
 
-        return Icon.FromHandle(bmp.GetHicon());
+        IntPtr hIcon = bmp.GetHicon();
+        try
+        {
+            // Icon.FromHandle doesn't take ownership of the HICON, so returning
+            // it directly strands the native handle for the process lifetime.
+            // Clone into a self-contained managed Icon and free the original.
+            using var native = Icon.FromHandle(hIcon);
+            return (Icon)native.Clone();
+        }
+        finally
+        {
+            PInvoke.DestroyIcon(new HICON(hIcon));
+        }
     }
 
     private static readonly string LogPath = Path.Combine(

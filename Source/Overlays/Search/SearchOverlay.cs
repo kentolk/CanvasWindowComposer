@@ -19,6 +19,14 @@ internal sealed class SearchOverlay : Form
     // Current search results
     private readonly List<SearchResult> _results = new();
 
+    // Alt-Tab style cycling. Engaged only when the Alt+S hotkey fires while the
+    // overlay is ALREADY open, i.e. the user is holding Alt and tapping S. That
+    // gate matters: opening with Alt+S and releasing Alt is the ordinary
+    // type-to-search flow, and must not commit a selection on release.
+    private const int AltReleasePollMs = 40;
+    private const int KeyStateDownBit = 0x8000;
+    private readonly Timer _altReleaseWatch;
+
     private const int WS_EX_TOOLWINDOW = 0x80;
     private const int WS_EX_TOPMOST = 0x8;
 
@@ -146,13 +154,42 @@ internal sealed class SearchOverlay : Form
         KeyDown += OnKeyDown;
         Deactivate += (_, _) => HideOverlay();
 
+        // Polled rather than driven off KeyUp: the overlay is shown while Alt is
+        // already physically down, so it never sees the matching keydown, and if
+        // focus drifts it would never see the keyup either — leaving the overlay
+        // stuck open waiting for a release that never arrives.
+        _altReleaseWatch = new Timer { Interval = AltReleasePollMs };
+        _altReleaseWatch.Tick += OnAltReleaseTick;
+
         ApplyRoundedRegion();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _altReleaseWatch.Dispose();
+        base.Dispose(disposing);
     }
 
     private void ApplyRoundedRegion()
     {
         HRGN rgn = PInvoke.CreateRoundRectRgn(0, 0, Width, Height, _cornerRadius, _cornerRadius);
-        Region = Region.FromHrgn(rgn);
+        if (rgn == (HRGN)IntPtr.Zero) return;
+
+        try
+        {
+            // Region.FromHrgn copies the GDI region rather than taking ownership,
+            // so the handle we created is ours to delete. OnResize runs on every
+            // result-list height change (i.e. most keystrokes), so skipping this
+            // leaks a GDI object per keystroke.
+            Region? previous = Region;
+            Region = Region.FromHrgn((IntPtr)rgn.Value);
+            previous?.Dispose();
+        }
+        finally
+        {
+            PInvoke.DeleteObject((HGDIOBJ)rgn.Value);
+        }
     }
 
     protected override void OnResize(EventArgs e)
@@ -172,8 +209,55 @@ internal sealed class SearchOverlay : Form
     {
         // No DisableSearch check needed: when the flag is set, Win32InputRouter
         // never registers Alt+S, so this handler never fires.
-        Toggle();
+        if (!Visible)
+        {
+            Toggle();
+            return;
+        }
+
+        // Already open and the hotkey fired again — the user is tapping S with
+        // Alt still held. Advance the highlight and start watching for the
+        // release that commits it. RegisterHotKey consumes the combination
+        // globally, so the "s" never reaches the search box.
+        AdvanceSelection();
+        _altReleaseWatch.Start();
     }
+
+    /// <summary>Next index with wrap-around; -1 when there is nothing to select.</summary>
+    internal static int NextIndex(int current, int count)
+    {
+        if (count <= 0) return -1;
+        int next = current + 1;
+        return next >= count ? 0 : next;
+    }
+
+    private void AdvanceSelection()
+    {
+        int next = NextIndex(_resultsList.SelectedIndex, _resultsList.Items.Count);
+        if (next < 0) return;
+        _resultsList.SelectedIndex = next;
+        Opacity = OpacityActive;
+    }
+
+    private void OnAltReleaseTick(object? sender, EventArgs e)
+    {
+        if (IsAltDown()) return;
+
+        StopCycling();
+        SelectCurrent();
+    }
+
+    private static bool IsAltDown()
+    {
+        return (PInvoke.GetAsyncKeyState((int)VIRTUAL_KEY.VK_MENU) & KeyStateDownBit) != 0;
+    }
+
+    /// <summary>Leave cycling mode. The timer running IS the cycling state.</summary>
+    private void StopCycling()
+    {
+        _altReleaseWatch.Stop();
+    }
+
 
     public void Toggle()
     {
@@ -208,8 +292,10 @@ internal sealed class SearchOverlay : Form
 
     private void HideOverlay()
     {
+        StopCycling();
         Hide();
     }
+
 
     private void OnSearchChanged(object? sender, EventArgs e)
     {
@@ -275,10 +361,19 @@ internal sealed class SearchOverlay : Form
                 break;
 
             case Keys.Space:
+                // Ctrl+Space only. The form sets KeyPreview, so handling a bare
+                // Space here ran before the search box ever saw it and swallowed
+                // it via SuppressKeyPress — a query containing a space could not
+                // be typed, and each space silently pinned the highlighted
+                // window instead. Pinned windows are skipped by reprojection, so
+                // the victim then sat fixed on screen while the canvas moved
+                // around it, looking like it was stuck on top of everything.
+                if (!e.Control) break;
                 TogglePinnedAt(_resultsList.SelectedIndex);
                 Opacity = OpacityActive;
                 e.SuppressKeyPress = true;
                 break;
+
         }
     }
 
@@ -324,8 +419,7 @@ internal sealed class SearchOverlay : Form
             return;
         }
 
-        var screen = _screens.PrimaryWorkingArea;
-        _canvas.CenterOn(world.X, world.Y, world.W, world.H, screen.Width, screen.Height);
+        CanvasNavigation.CenterOnWindow(_canvas, _screens, world);
         _canvas.Commit();
         HideOverlay();
     }

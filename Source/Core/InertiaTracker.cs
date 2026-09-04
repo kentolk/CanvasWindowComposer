@@ -21,6 +21,10 @@ internal sealed class InertiaTracker
     private readonly List<(double dx, double dy, long ticks)> _samples = new();
     private readonly IClock _clock;
     private double _vx, _vy;
+    // Sub-pixel carry. Tick emits whole pixels and keeps the fraction for the
+    // next frame, so the slow tail of a fling still advances instead of
+    // rounding to zero every frame until the stop threshold is crossed.
+    private double _residualX, _residualY;
     private volatile bool _active;
     private long _lastTick;
 
@@ -73,6 +77,8 @@ internal sealed class InertiaTracker
                 {
                     _vx = sumDx / elapsed;
                     _vy = sumDy / elapsed;
+                    _residualX = 0;
+                    _residualY = 0;
                     hasVelocity = Math.Abs(_vx) >= StopThresholdPxPerMs ||
                                   Math.Abs(_vy) >= StopThresholdPxPerMs;
                 }
@@ -94,6 +100,7 @@ internal sealed class InertiaTracker
         lock (_lock)
         {
             _vx = _vy = 0;
+            _residualX = _residualY = 0;
             _samples.Clear();
         }
     }
@@ -126,8 +133,16 @@ internal sealed class InertiaTracker
             return (0, 0, true);
         }
 
-        int dx = (int)Math.Round(vx * dt);
-        int dy = (int)Math.Round(vy * dt);
+        // Integrate into the carry and emit only whole pixels. Rounding each
+        // frame independently discards up to half a pixel per axis per frame,
+        // which at the stop threshold (~0.33px/frame at 60Hz) is most of the
+        // remaining motion.
+        _residualX += vx * dt;
+        _residualY += vy * dt;
+        int dx = (int)_residualX;
+        int dy = (int)_residualY;
+        _residualX -= dx;
+        _residualY -= dy;
         return (dx, dy, false);
     }
 }

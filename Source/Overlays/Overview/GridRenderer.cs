@@ -427,6 +427,11 @@ float4 PSMain(VSOut input) : SV_Target
     private volatile bool _alive = true;
     private volatile bool _renderThreadIdle = true;
     private readonly System.Threading.ManualResetEventSlim _wakeEvent = new(false);
+    // Serialises Start/Stop/Dispose against each other. The render loop must
+    // never Reset the wake event itself: it does so after leaving the inner
+    // loop, which can swallow a Set() from a Start() that raced in, leaving
+    // _running true but the thread asleep until the next Start.
+    private readonly object _runLock = new();
     private System.Threading.Thread? _renderThread;
 
     private volatile float _renderCamX, _renderCamY, _renderZoom;
@@ -481,9 +486,13 @@ float4 PSMain(VSOut input) : SV_Target
         _renderCamX = (float)camX;
         _renderCamY = (float)camY;
         _renderZoom = (float)zoom;
-        _running = true;
-        _wakeEvent.Set();
+        lock (_runLock)
+        {
+            _running = true;
+            _wakeEvent.Set();
+        }
     }
+
 
     /// <summary>Update camera for next frame (call from any thread).</summary>
     public void UpdateCamera(double camX, double camY, double zoom)
@@ -496,8 +505,13 @@ float4 PSMain(VSOut input) : SV_Target
     /// <summary>Stop rendering and go back to sleep.</summary>
     public void Stop()
     {
-        _running = false;
+        lock (_runLock)
+        {
+            _running = false;
+            _wakeEvent.Reset();
+        }
     }
+
 
     /// <summary>Start the background thread (call once after Initialize).</summary>
     public void StartThread()
@@ -524,8 +538,7 @@ float4 PSMain(VSOut input) : SV_Target
                 RenderFrame();
                 // Present(1) inside RenderFrame waits for VSync
             }
-
-            _wakeEvent.Reset(); // go back to sleep
+            // Stop() owns the Reset — see _runLock.
         }
         _renderThreadIdle = true;
     }
@@ -536,10 +549,25 @@ float4 PSMain(VSOut input) : SV_Target
         if (_swapChain == null || (_width == width && _height == height)) return;
 
         bool wasRunning = _running;
-        _running = false;
-        _wakeEvent.Reset();
-        // Spin until render thread finishes the current frame and goes idle
-        while (!_renderThreadIdle) System.Threading.Thread.Yield();
+        lock (_runLock)
+        {
+            _running = false;
+            _wakeEvent.Reset();
+        }
+
+        // Wait for the render thread to finish the current frame and park.
+        // Bounded: this runs on the UI thread (WM_DPICHANGED), and a render
+        // thread wedged in Present — a monitor pulled mid-DPI-change will do
+        // it — must not hang the whole app. On timeout we skip the resize and
+        // leave the swap chain at its old size rather than resizing it out
+        // from under a thread that is still drawing.
+        var spin = System.Diagnostics.Stopwatch.StartNew();
+        while (!_renderThreadIdle)
+        {
+            if (spin.ElapsedMilliseconds > RenderThreadJoinTimeoutMs)
+                return;
+            System.Threading.Thread.Yield();
+        }
 
         _width = width;
         _height = height;
@@ -550,10 +578,14 @@ float4 PSMain(VSOut input) : SV_Target
 
         if (wasRunning)
         {
-            _running = true;
-            _wakeEvent.Set();
+            lock (_runLock)
+            {
+                _running = true;
+                _wakeEvent.Set();
+            }
         }
     }
+
 
     private void RenderFrame()
     {
@@ -609,9 +641,20 @@ float4 PSMain(VSOut input) : SV_Target
     public void Dispose()
     {
         _alive = false;
-        _running = false;
-        _wakeEvent.Set(); // wake to exit
-        _renderThread?.Join(RenderThreadJoinTimeoutMs);
+        lock (_runLock)
+        {
+            _running = false;
+            _wakeEvent.Set(); // wake to exit
+        }
+
+        // Only reclaim anything if the render thread is provably gone. Disposing
+        // the wait handle or the D3D objects out from under a thread still inside
+        // Wait()/RenderFrame() throws on that thread, and an unhandled exception
+        // on a background thread takes the process down — an ugly crash on what
+        // should be a clean exit. If it didn't stop, let process teardown do it.
+        bool exited = _renderThread == null || _renderThread.Join(RenderThreadJoinTimeoutMs);
+        if (!exited) return;
+
         _wakeEvent.Dispose();
 
         _rtv?.Dispose();

@@ -11,11 +11,15 @@ internal enum MouseEventType : byte
     Zoom,
 }
 
+
 internal readonly struct MouseEvent
 {
     public readonly MouseEventType Type;
+
+    /// <summary>Motion delta for <see cref="MouseEventType.Pan"/>.</summary>
     public readonly int Dx;
     public readonly int Dy;
+
 
     /// <summary>
     /// Stopwatch.GetTimestamp() ticks at the moment the event was parsed off

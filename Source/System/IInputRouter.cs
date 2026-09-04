@@ -27,6 +27,13 @@ internal interface IInputRouter
     event Action? SearchHotkey;
     event Action? OverviewHotkey;
 
+    /// <summary>Ctrl+Alt+Arrow: jump the camera to the neighbouring window.</summary>
+    event Action<NavDirection>? NavigateHotkey;
+
+    /// <summary>Ctrl+Alt+G: lay the canvas out in a grid.</summary>
+    event Action? ArrangeGridHotkey;
+
+
     /// <summary>
     /// Raised when the user presses Esc while the Esc hotkey is enabled.
     /// Esc is registered/unregistered on demand (via <see cref="EnableEscHotkey"/>

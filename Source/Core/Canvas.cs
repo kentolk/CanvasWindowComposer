@@ -100,6 +100,16 @@ internal sealed class Canvas
     /// <summary>Raised when the caller explicitly commits canvas state to the system.</summary>
     public event Action? Committed;
 
+    /// <summary>
+    /// Raised when a tracked window leaves the canvas — closed, or gone stale.
+    /// Fires only for windows that were actually present, which is what makes it
+    /// usable as a "a real window just vanished" signal; the raw
+    /// EVENT_OBJECT_DESTROY stream includes every tooltip and flyout on the
+    /// system.
+    /// </summary>
+    public event Action<IntPtr>? WindowRemoved;
+
+
     /// <summary>Propagate current canvas state to the system (reproject real windows).</summary>
     public void Commit()
     {
@@ -200,8 +210,12 @@ internal sealed class Canvas
 
         foreach (var (hWnd, r) in _windows)
         {
-            if (r.State != WindowState.Normal || r.PinnedToScreen) continue;
+            // Pinned windows count towards the frame: the minimap draws them, so
+            // leaving them out of the extents would push them outside the map
+            // area and clip them straight back out of sight.
+            if (r.State != WindowState.Normal) continue;
             any = true;
+
             if (r.X < minX) minX = r.X;
             if (r.Y < minY) minY = r.Y;
             if (r.X + r.W > maxX) maxX = r.X + r.W;
@@ -225,8 +239,10 @@ internal sealed class Canvas
 
     public void RemoveWindow(IntPtr hWnd)
     {
-        _windows.Remove(hWnd);
+        if (_windows.Remove(hWnd))
+            WindowRemoved?.Invoke(hWnd);
     }
+
 
     public void ClearWindows()
     {
@@ -294,10 +310,13 @@ internal sealed class Canvas
         if (old == state) return;
 
         r.State = state;
-        _windows[hWnd] = r;
-
+        // Stamp the sentinel before the write-back. WorldRect is a struct,
+        // so mutating r after storing it into the dictionary changes only the
+        // local copy and the minimized window keeps a stale foreground stamp.
         if (state == WindowState.Minimized)
             r.ZOrder = -1;
+        _windows[hWnd] = r;
+
         if (old == WindowState.Minimized || state == WindowState.Minimized)
             CollapseChanged?.Invoke(hWnd);
         if (old == WindowState.Maximized || state == WindowState.Maximized)

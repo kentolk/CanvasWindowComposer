@@ -30,7 +30,12 @@ internal sealed class RawMouseInput : IDisposable
     private static readonly IntPtr HWND_MESSAGE = new(-3);
 
     private readonly IAppConfig _config;
-    private readonly MouseCurveScaler? _curve;
+
+    // Swapped (not mutated) when DisableMouseCurve changes or Windows pointer
+    // settings change. The polling thread only ever reads it, and a reference
+    // assignment is atomic, so a swap needs no lock — but readers must snapshot
+    // it into a local rather than testing and then dereferencing the field.
+    private volatile MouseCurveScaler? _curve;
 
     private volatile HashSet<IntPtr> _extraPanSurfaces = new();
     public void SetExtraPanSurfaces(IEnumerable<IntPtr> handles)
@@ -42,7 +47,17 @@ internal sealed class RawMouseInput : IDisposable
         _extraPanSurfaces = new HashSet<IntPtr>();
     }
 
-    public bool Enabled { get; set; } = true;
+    // Flipped by the tray "Enabled" item on the UI thread, read on the polling
+    // thread — volatile so the toggle is picked up on the next event rather than
+    // whenever the JIT decides to re-read it.
+    private volatile bool _enabled = true;
+
+    public bool Enabled
+    {
+        get { return _enabled; }
+        set { _enabled = value; }
+    }
+
 
     /// <summary>Ring buffer of parsed mouse events. Drained by the UI thread.</summary>
     public MouseEventRingBuffer Events { get; } = new(256);
@@ -55,6 +70,7 @@ internal sealed class RawMouseInput : IDisposable
     // Drag state — polling thread only
     private bool _dragging;
     private bool _altDrag;
+
     // Timestamp of the previous raw motion event in this drag, used to estimate
     // how many native HID polls a coalesced event represents.
     private long _lastMotionTicks;
@@ -94,7 +110,29 @@ internal sealed class RawMouseInput : IDisposable
             _onFrame();
         };
         _curve = config.DisableMouseCurve ? null : new MouseCurveScaler();
+        config.Changed += OnConfigChanged;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
     }
+
+    private void OnConfigChanged()
+    {
+        bool wantCurve = !_config.DisableMouseCurve;
+        if (wantCurve == (_curve != null)) return;
+        _curve = wantCurve ? new MouseCurveScaler() : null;
+    }
+
+    /// <summary>
+    /// Windows pointer speed / "Enhance pointer precision" changed. Build a new
+    /// scaler rather than calling Refresh() on the live one: the polling thread
+    /// may be inside Apply(), and MouseCurveScaler is explicitly single-threaded.
+    /// </summary>
+    private void OnUserPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category != Microsoft.Win32.UserPreferenceCategory.Mouse) return;
+        if (_curve == null) return;
+        _curve = new MouseCurveScaler();
+    }
+
 
     public void Install()
     {
@@ -116,8 +154,18 @@ internal sealed class RawMouseInput : IDisposable
 
     public void Dispose()
     {
+        _config.Changed -= OnConfigChanged;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         _shutdown.Set();
-        _thread?.Join(TimeSpan.FromSeconds(1));
+
+        // The polling thread waits on _shutdown's raw handle (via
+        // DangerousGetHandle), so disposing it while that thread is still parked
+        // in MsgWaitForMultipleObjects hands the OS a recycled handle. Only
+        // reclaim once the thread has actually exited; on timeout, leak the two
+        // events and let process teardown deal with them.
+        if (_thread != null && !_thread.Join(TimeSpan.FromSeconds(1)))
+            return;
+
         _shutdown.Dispose();
         _started.Dispose();
     }
@@ -270,7 +318,22 @@ internal sealed class RawMouseInput : IDisposable
 
     private void OnRawMouse(ref RAWMOUSE mouse, IntPtr hDevice, long ts)
     {
-        if (!Enabled) return;
+        if (!_enabled)
+        {
+            // Disabled mid-drag (tray toggle, or a desktop switch). Close the
+            // gesture out here on the polling thread rather than leaving
+            // _dragging latched: re-enabling would otherwise resume panning with
+            // no button held, and the consumer would never see a DragEnded to
+            // release inertia against.
+            if (_dragging)
+            {
+                _dragging = false;
+                _curve?.ResetGestureState();
+                Events.TryEnqueue(new MouseEvent(MouseEventType.DragEnded, timestamp: ts));
+            }
+
+            return;
+        }
 
         ushort btn = mouse.Anonymous.Anonymous.usButtonFlags;
 
@@ -280,6 +343,7 @@ internal sealed class RawMouseInput : IDisposable
             OnMiddleUp(ts);
         if ((btn & (PInvoke.RI_MOUSE_LEFT_BUTTON_DOWN | PInvoke.RI_MOUSE_RIGHT_BUTTON_DOWN)) != 0)
             Events.TryEnqueue(new MouseEvent(MouseEventType.ButtonDown, timestamp: ts));
+
         if ((btn & PInvoke.RI_MOUSE_WHEEL) != 0)
             OnWheel(ts);
 
@@ -287,8 +351,11 @@ internal sealed class RawMouseInput : IDisposable
         {
             int dx = mouse.lLastX;
             int dy = mouse.lLastY;
-            if (_curve != null)
+
+            MouseCurveScaler? curve = _curve;
+            if (curve != null)
             {
+
                 // Estimate native HID polls represented: gap_ms / poll_interval.
                 // Per-device interval is queried lazily from the HID driver
                 // (RID_DEVICE_INFO_MOUSE.dwSampleRate). A bigger ratio means
@@ -298,7 +365,7 @@ internal sealed class RawMouseInput : IDisposable
                 double gapMs = (ts - _lastMotionTicks) / TicksPerMs;
                 double pollMs = GetPollIntervalMs(hDevice);
                 int chunks = Math.Clamp((int)Math.Round(gapMs / pollMs), 1, MaxCurveChunks);
-                _curve.Apply(dx, dy, chunks, out dx, out dy);
+                curve.Apply(dx, dy, chunks, out dx, out dy);
             }
             _lastMotionTicks = ts;
             if (dx != 0 || dy != 0)
@@ -317,10 +384,10 @@ internal sealed class RawMouseInput : IDisposable
         {
             _dragging = true;
             _altDrag = alt;
+            Events.TryEnqueue(new MouseEvent(MouseEventType.DragStarted, timestamp: ts));
             // Seed gap so the first motion event computes chunks=1, not a huge
             // value derived from the time since the previous drag.
             _lastMotionTicks = ts;
-            Events.TryEnqueue(new MouseEvent(MouseEventType.DragStarted, timestamp: ts));
         }
         else
         {
@@ -328,10 +395,12 @@ internal sealed class RawMouseInput : IDisposable
         }
     }
 
+
     private void OnMiddleUp(long ts)
     {
         if (!_dragging) return;
         _dragging = false;
+
         // Curve scaler accumulates last-band + sub-pixel state across events.
         // Carrying that into the next drag gives it a different scale than the
         // first drag started with — pan diverges from cursor on drag 2+.

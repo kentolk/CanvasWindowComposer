@@ -8,8 +8,12 @@ internal sealed class FakeInputRouter : IInputRouter
     public event Action? InputAvailable;
     public event Action? DragStarted;
     public event Action? ButtonDown;
+
     public event Action? SearchHotkey;
     public event Action? OverviewHotkey;
+    public event Action<NavDirection>? NavigateHotkey;
+    public event Action? ArrangeGridHotkey;
+
     public event Action? EscPressed;
 
     public int EnableEscHotkeyCalls;
@@ -122,12 +126,24 @@ internal sealed class FakeInputRouter : IInputRouter
         ButtonDown?.Invoke();
     }
 
+
     public void RaiseSearchHotkey()
     {
         SearchHotkey?.Invoke();
     }
 
+    public void RaiseNavigateHotkey(NavDirection direction)
+    {
+        NavigateHotkey?.Invoke(direction);
+    }
+
+    public void RaiseArrangeGridHotkey()
+    {
+        ArrangeGridHotkey?.Invoke();
+    }
+
     public void RaiseOverviewHotkey()
+
     {
         OverviewHotkey?.Invoke();
     }
