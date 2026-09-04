@@ -13,6 +13,7 @@ internal sealed class FakeAppConfig : IAppConfig
     public int GridColumns { get; set; } = GridArranger.DefaultColumns;
     public bool EnableDragEdgeNavigation { get; set; }
     public bool AutoGridNewWindows { get; set; } = true;
+    public bool FollowFocusedWindows { get; set; } = true;
 
 
 

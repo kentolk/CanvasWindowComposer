@@ -13,24 +13,11 @@ internal sealed class ForegroundCoordinator
 {
     private const long ForegroundSuppressionMs = 500;
 
-    /// <summary>
-    /// How much of a focused window must already be on a monitor before we leave
-    /// the camera alone. Below this we treat the window as "not reachable where
-    /// it is" and recentre on it.
-    ///
-    /// This used to be a bare any-overlap test, which meant a window with a
-    /// single column of pixels poking onto the screen counted as visible and was
-    /// never recentred. Clicking its taskbar icon then focused it without
-    /// bringing it into view — and if it happened to be the foreground window
-    /// already, Windows' own taskbar behaviour minimised and restored it
-    /// instead, which reads as the click doing nothing useful.
-    /// </summary>
-    private const double MinVisibleFraction = 0.8;
-
     private readonly Canvas _canvas;
     private readonly IOverviewController _overview;
     private readonly IClock _clock;
     private readonly IScreens _screens;
+    private readonly IAppConfig _config;
 
     private long _lastWindowLostTick;
     private long _lastOverlayClosedTick;
@@ -50,12 +37,14 @@ internal sealed class ForegroundCoordinator
         IOverviewController overview,
         IInputRouter input,
         IClock clock,
-        IScreens screens)
+        IScreens screens,
+        IAppConfig config)
     {
         _canvas = canvas;
         _overview = overview;
         _clock = clock;
         _screens = screens;
+        _config = config;
 
         overview.BeforeModeChanged += OnOverviewModeChanged;
 
@@ -127,6 +116,11 @@ internal sealed class ForegroundCoordinator
         // vanish can't tell whether it is losing focus or merely leaving.
         _lastFocusedHWnd = hwnd;
 
+        // Read per-event, not cached, so toggling it in the tray or editing
+        // config.ini takes effect on the very next focus change.
+        if (!_config.FollowFocusedWindows)
+            return;
+
         if (_overview.CurrentMode != OverviewMode.Hidden)
             return;
 
@@ -142,7 +136,7 @@ internal sealed class ForegroundCoordinator
                 return;
 
             var r = _canvas.WorldToScreen(world);
-            if (!IsSufficientlyVisible(r))
+            if (ShouldBringIntoView(r))
             {
                 CanvasNavigation.CenterOnWindow(_canvas, _screens, world);
                 _canvas.Commit();
@@ -151,24 +145,21 @@ internal sealed class ForegroundCoordinator
     }
 
     /// <summary>
-    /// True when at least <see cref="MinVisibleFraction"/> of <paramref name="r"/>
-    /// falls inside some monitor — i.e. the window is usable where it currently
-    /// sits and moving the camera would be a gratuitous jump.
+    /// Whether the camera should travel to a window that has just taken focus.
+    ///
+    /// True only when the window has no pixels on any monitor — the user focused
+    /// something they cannot see at all, from the taskbar or Alt-Tab, and without
+    /// this it would hold focus while they had no idea where it went.
+    ///
+    /// Anything with even a sliver on screen is left alone. Squaring up a window
+    /// that fills most of the view but hangs off an edge used to happen here too,
+    /// and it fired too rarely to be predictable; it is now the explicit
+    /// Ctrl+Alt+middle-click gesture in <see cref="CanvasNavigator"/>, where the
+    /// user asks for it by name.
     /// </summary>
-    private bool IsSufficientlyVisible(WindowRect r)
+    private bool ShouldBringIntoView(WindowRect r)
     {
-        long area = (long)Math.Max(0, r.W) * Math.Max(0, r.H);
-        if (area <= 0) return false;
-
-        long visible = 0;
-        foreach (var bounds in _screens.AllBounds)
-        {
-            int overlapW = Math.Min(r.X + r.W, bounds.Right) - Math.Max(r.X, bounds.X);
-            int overlapH = Math.Min(r.Y + r.H, bounds.Bottom) - Math.Max(r.Y, bounds.Y);
-            if (overlapW <= 0 || overlapH <= 0) continue;
-            visible += (long)overlapW * overlapH;
-        }
-
-        return visible >= area * MinVisibleFraction;
+        if (r.W <= 0 || r.H <= 0) return false;
+        return CanvasNavigation.ScreenCoverage(r, _screens) <= 0;
     }
 }

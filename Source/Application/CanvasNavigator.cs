@@ -33,6 +33,13 @@ internal sealed class CanvasNavigator : IDisposable
     private const long EdgeRepeatMs = 700;
     private const int KeyStateDownBit = 0x8000;
 
+    /// <summary>
+    /// How much of a monitor a window must cover for Ctrl+Alt+middle-click to
+    /// centre it. Below this the window is off to one side rather than filling
+    /// the view, and centring it would be a jump rather than a tidy-up.
+    /// </summary>
+    private const double MinCoverageToCenter = 0.7;
+
 
     private readonly Canvas _canvas;
     private readonly WindowManager _wm;
@@ -75,6 +82,7 @@ internal sealed class CanvasNavigator : IDisposable
 
         input.NavigateHotkey += OnNavigate;
         input.ArrangeGridHotkey += OnArrangeGrid;
+        input.CenterRequested += OnCenterRequested;
 
         wm.WindowRegistered += OnWindowRegistered;
 
@@ -112,6 +120,35 @@ internal sealed class CanvasNavigator : IDisposable
     private void OnArrangeGrid()
     {
         ArrangeGrid();
+    }
+
+
+    /// <summary>
+    /// Ctrl+Alt+middle-click: centre the canvas on the window under the cursor,
+    /// but only when that window already fills most of the screen.
+    ///
+    /// The coverage gate is what makes this worth a gesture rather than a plain
+    /// "centre what I clicked". The case it serves is a window that fills the
+    /// view but hangs off an edge, where squaring it up is obviously what you
+    /// meant. A window sitting off to one side is left alone: you clicked the
+    /// part you could see, and hauling the view across to it is the behaviour
+    /// this replaced.
+    /// </summary>
+    private void OnCenterRequested(int screenX, int screenY)
+    {
+        IntPtr hWnd = _wm.WindowAt(screenX, screenY);
+        if (hWnd == IntPtr.Zero) return;
+        if (!_canvas.Windows.TryGetValue(hWnd, out var world)) return;
+
+        // Pinned windows do not move with the camera, so centring on one would
+        // drag every other window across while it sat still.
+        if (world.PinnedToScreen) return;
+
+        var r = _canvas.WorldToScreen(world);
+        if (CanvasNavigation.ScreenCoverage(r, _screens) < MinCoverageToCenter) return;
+
+        CanvasNavigation.CenterOnWindow(_canvas, _screens, world);
+        _canvas.Commit();
     }
 
     private void OnConfigChanged()
@@ -266,6 +303,7 @@ internal sealed class CanvasNavigator : IDisposable
     {
         _input.NavigateHotkey -= OnNavigate;
         _input.ArrangeGridHotkey -= OnArrangeGrid;
+        _input.CenterRequested -= OnCenterRequested;
 
         _wm.WindowRegistered -= OnWindowRegistered;
         _config.Changed -= OnConfigChanged;

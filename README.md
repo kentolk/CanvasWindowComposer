@@ -28,6 +28,7 @@ Turns your Windows desktop into an infinite, pannable, zoomable canvas. Middle-c
 |---|---|
 | Middle-click drag on desktop | Pan all windows |
 | Alt + middle-click drag anywhere | Pan (works over windows) |
+| Ctrl + Alt + middle-click | Centre the canvas on the window under the cursor, if it fills most of the screen |
 | Alt + Q | Toggle overview (map-view) |
 | Esc | Close the overview |
 | Alt + scroll | Zoom in/out around cursor (opens overview if closed) |
@@ -41,6 +42,7 @@ Turns your Windows desktop into an infinite, pannable, zoomable canvas. Middle-c
 | Tray menu > Refresh | Unclip and redraw all windows |
 | Tray menu > Arrange in Grid | Same as Ctrl+Alt+G |
 | Tray menu > Auto-Grid New Windows | Whether new windows join an existing grid |
+| Tray menu > Follow Focused Windows | Whether the camera travels to a focused window that is entirely off screen |
 | Tray menu > Show Pinned/Fullscreen While Panning | Whether screen-fixed windows stay visible during a pan |
 | Tray menu > Open Config Directory | Open the config folder |
 
@@ -77,6 +79,7 @@ Layout and navigation:
 | `AutoGridNewWindows` | `true` | Drop newly opened windows into the first free cell. Also a tray toggle |
 | `ShowScreenFixedWindowsDuringPan` | `true` | Show pinned / fullscreen windows while panning. Also a tray toggle |
 | `EnableDragEdgeNavigation` | `false` | Hold the left mouse button against a screen edge to advance to the next window |
+| `FollowFocusedWindows` | `true` | Bring the camera to a focused window that is entirely off screen. Also a tray toggle |
 
 ### Notes
 
@@ -101,11 +104,26 @@ a "rename branch" dialog belongs beside the window that opened it, and a
 fixed-size window can't fill a cell anyway. Dialogs still live on the canvas and
 pan with everything else.
 
-**The camera only chases a window you could not already reach.** Focus arriving
-from the taskbar or Alt-Tab recentres the canvas only when less than 80% of that
-window is on a monitor — anything more visible is left where it is, because
-moving the camera under a window you can already see reads as the view jumping
-for no reason. Pinned windows are never chased.
+**The camera moves by itself for one reason only: you focused a window that is
+not on screen at all.** A taskbar-icon click or Alt-Tab for a window parked
+elsewhere on the canvas brings it to you, because otherwise it holds focus while
+you have no idea where it went. A window with anything at all on screen is left
+alone — you clicked the part you could see, and hauling the view across to it is
+a jump you did not ask for. Pinned windows are never chased, and
+`FollowFocusedWindows=false` turns even the off-screen case off.
+
+**Ctrl+Alt+middle-click squares up the window under the cursor**, when that window
+already covers at least 70% of a monitor. This is the "most of my screen is this
+window, but it is hanging off an edge" case — it used to happen automatically,
+which fired too rarely to be predictable, so it is now something you ask for. The
+coverage gate is what stops it becoming "centre whatever I clicked": a window off
+to one side is deliberately left where it is. Adjust the threshold at
+`CanvasNavigator.MinCoverageToCenter`.
+
+The measure is how much of the *screen* the window covers, not how much of the
+window is visible. Those come apart exactly where it matters — a small window off
+to the side and a large window hanging off an edge can both be 40% visible, and
+only one of them fills the view.
 
 **Edge navigation is a heuristic, not a drag detector.** A drag-and-drop running in
 another application is invisible from here — `DoDragDrop` is a modal loop inside

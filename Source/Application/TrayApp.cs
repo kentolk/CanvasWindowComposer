@@ -47,7 +47,7 @@ internal sealed class TrayApp : ApplicationContext
         _wm = new WindowManager(_canvas, winApi, _config, _input, _clock, _vds, useAsyncProjection: true);
         _overview = new OverviewManager(_canvas, _wm, winApi, _input, _config, _screens);
         _overview.Warmup();
-        _foreground = new ForegroundCoordinator(_canvas, _overview, _input, _clock, _screens);
+        _foreground = new ForegroundCoordinator(_canvas, _overview, _input, _clock, _screens, _config);
         _desktops = new DesktopStateCache(_canvas, _wm, _overview, _vds);
         _navigator = new CanvasNavigator(_canvas, _wm, _input, _screens, _config, _clock);
 
@@ -72,6 +72,13 @@ internal sealed class TrayApp : ApplicationContext
         {
             Checked = _config.AutoGridNewWindows
         };
+        var followFocusItem = new ToolStripMenuItem(
+            "Follow Focused Windows",
+            null,
+            OnToggleFollowFocusedWindows)
+        {
+            Checked = _config.FollowFocusedWindows
+        };
         var refreshItem = new ToolStripMenuItem("Refresh", null, OnRefresh);
         var openConfigItem = new ToolStripMenuItem("Open Config Directory", null,
             (_, _) => OpenConfigDirectory());
@@ -84,6 +91,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(showScreenFixedItem);
         menu.Items.Add(arrangeGridItem);
         menu.Items.Add(autoGridItem);
+        menu.Items.Add(followFocusItem);
         menu.Items.Add(refreshItem);
         menu.Items.Add(openConfigItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -166,6 +174,19 @@ internal sealed class TrayApp : ApplicationContext
     {
         bool enabled = !_config.AutoGridNewWindows;
         _config.SetAutoGridNewWindows(enabled);
+
+        if (sender is ToolStripMenuItem item)
+            item.Checked = enabled;
+    }
+
+    /// <summary>
+    /// Toggle whether the camera travels to a focused window the user cannot
+    /// properly see. Persisted to config.ini so the tray and the file agree.
+    /// </summary>
+    private void OnToggleFollowFocusedWindows(object? sender, EventArgs e)
+    {
+        bool enabled = !_config.FollowFocusedWindows;
+        _config.SetFollowFocusedWindows(enabled);
 
         if (sender is ToolStripMenuItem item)
             item.Checked = enabled;

@@ -8,6 +8,7 @@ internal sealed class FakeInputRouter : IInputRouter
     public event Action? InputAvailable;
     public event Action? DragStarted;
     public event Action? ButtonDown;
+    public event Action<int, int>? CenterRequested;
 
     public event Action? SearchHotkey;
     public event Action? OverviewHotkey;
@@ -124,6 +125,11 @@ internal sealed class FakeInputRouter : IInputRouter
     public void RaiseButtonDown()
     {
         ButtonDown?.Invoke();
+    }
+
+    public void RaiseCenterRequested(int screenX, int screenY)
+    {
+        CenterRequested?.Invoke(screenX, screenY);
     }
 
 

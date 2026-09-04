@@ -13,11 +13,12 @@ public class ForegroundCoordinatorTests
         public FakeScreens Screens = new();
         public FakeInputRouter Input = new();
         public FakeOverviewController Overview = new();
+        public FakeAppConfig Config = new();
         public ForegroundCoordinator Foreground = null!;
 
         public Harness()
         {
-            Foreground = new ForegroundCoordinator(Canvas, Overview, Input, Clock, Screens);
+            Foreground = new ForegroundCoordinator(Canvas, Overview, Input, Clock, Screens, Config);
         }
     }
 
@@ -129,50 +130,85 @@ public class ForegroundCoordinatorTests
         Assert.Equal(camBefore, h.Canvas.CamX);
     }
 
-    // ==================== PARTIAL VISIBILITY ====================
+    // ==================== WHAT COUNTS AS "CANNOT SEE IT" ====================
+    //
+    // Automatic recentring now fires for one thing only: a window with no pixels
+    // anywhere. Squaring up a window that fills the view but hangs off an edge is
+    // the explicit Ctrl+Alt+middle-click gesture, tested in CanvasNavigatorTests.
 
     [Fact]
-    public void WindowFocused_OnlyASliverOnScreen_RecentersCamera()
+    public void WindowFocused_SliverAtTheSide_DoesNotMoveTheCamera()
     {
         var h = new Harness();
-        // 20px of a 400px-wide window pokes onto the 1920x1080 monitor. The user
-        // clicking this window's taskbar icon expects it to come to them.
+        // 20px of a 400px-wide window pokes onto the 1920x1080 monitor. Almost
+        // none of the window is visible, but the user clicked the part that is,
+        // so hauling the view across to it is the last thing they want.
         h.Canvas.SetWindow((IntPtr)1, 1900, 100, 400, 300);
         h.Clock.Now = 10000;
 
         double camBefore = h.Canvas.CamX;
         h.Input.RaiseWindowFocused((IntPtr)1);
 
-        Assert.NotEqual(camBefore, h.Canvas.CamX);
+        Assert.Equal(camBefore, h.Canvas.CamX);
     }
 
     [Fact]
-    public void WindowFocused_HalfOnScreen_RecentersCamera()
+    public void WindowFocused_QuarterOfASmallWindowVisible_DoesNotMoveTheCamera()
     {
         var h = new Harness();
-        // 100 of 400 visible — a quarter. Still not usable where it is.
+        // 100 of 400 visible. Under the old window-fraction rule this recentred.
         h.Canvas.SetWindow((IntPtr)1, 1820, 100, 400, 300);
         h.Clock.Now = 10000;
 
         double camBefore = h.Canvas.CamX;
         h.Input.RaiseWindowFocused((IntPtr)1);
 
-        Assert.NotEqual(camBefore, h.Canvas.CamX);
+        Assert.Equal(camBefore, h.Canvas.CamX);
     }
 
     [Fact]
-    public void WindowFocused_MostlyOnScreen_DoesNotRecenter()
+    public void WindowFocused_FillsMostOfTheScreenButCutOff_DoesNotMoveTheCamera()
     {
         var h = new Harness();
-        // 320 of 400 visible — comfortably usable, so moving the camera would
-        // just be a jarring jump for no reason.
-        h.Canvas.SetWindow((IntPtr)1, 1600, 100, 400, 300);
+        // 2000x1000 hanging 100px off the left edge — ~92% screen coverage. This
+        // used to square itself up automatically, which fired too rarely to be
+        // predictable. It is now Ctrl+Alt+middle-click, and nothing else.
+        h.Canvas.SetWindow((IntPtr)1, -100, 40, 2000, 1000);
         h.Clock.Now = 10000;
 
         double camBefore = h.Canvas.CamX;
         h.Input.RaiseWindowFocused((IntPtr)1);
 
         Assert.Equal(camBefore, h.Canvas.CamX);
+    }
+
+    [Fact]
+    public void WindowFocused_TouchingTheScreenByOnePixel_DoesNotMoveTheCamera()
+    {
+        var h = new Harness();
+        // The boundary of "no pixels anywhere": one column still on screen.
+        h.Canvas.SetWindow((IntPtr)1, 1919, 100, 400, 300);
+        h.Clock.Now = 10000;
+
+        double camBefore = h.Canvas.CamX;
+        h.Input.RaiseWindowFocused((IntPtr)1);
+
+        Assert.Equal(camBefore, h.Canvas.CamX);
+    }
+
+    [Fact]
+    public void WindowFocused_JustPastTheEdge_RecentersCamera()
+    {
+        var h = new Harness();
+        // One pixel further and nothing is visible, so the user has focused
+        // something they genuinely cannot see.
+        h.Canvas.SetWindow((IntPtr)1, 1920, 100, 400, 300);
+        h.Clock.Now = 10000;
+
+        double camBefore = h.Canvas.CamX;
+        h.Input.RaiseWindowFocused((IntPtr)1);
+
+        Assert.NotEqual(camBefore, h.Canvas.CamX);
     }
 
     [Fact]
@@ -184,6 +220,63 @@ public class ForegroundCoordinatorTests
 
         double camBefore = h.Canvas.CamX;
         h.Input.RaiseWindowFocused((IntPtr)1);
+
+        Assert.Equal(camBefore, h.Canvas.CamX);
+    }
+
+    // ==================== THE TOGGLE ====================
+
+    [Fact]
+    public void FollowFocusedWindowsOff_LeavesEvenAnOffScreenWindowAlone()
+    {
+        var h = new Harness();
+        h.Config.FollowFocusedWindows = false;
+        h.Canvas.SetWindow((IntPtr)1, 5000, 5000, 400, 300);
+        h.Clock.Now = 10000;
+
+        double camBefore = h.Canvas.CamX;
+        h.Input.RaiseWindowFocused((IntPtr)1);
+
+        Assert.Equal(camBefore, h.Canvas.CamX);
+    }
+
+    [Fact]
+    public void FollowFocusedWindows_IsReadPerEventSoTheTrayToggleAppliesAtOnce()
+    {
+        var h = new Harness();
+        h.Canvas.SetWindow((IntPtr)1, 5000, 5000, 400, 300);
+        h.Clock.Now = 10000;
+
+        h.Config.FollowFocusedWindows = false;
+        h.Input.RaiseWindowFocused((IntPtr)1);
+        Assert.Equal(0, h.Canvas.CamX);
+
+        // No Changed event, no reconstruction — flipping the flag is enough.
+        h.Config.FollowFocusedWindows = true;
+        h.Input.RaiseWindowFocused((IntPtr)1);
+        Assert.NotEqual(0, h.Canvas.CamX);
+    }
+
+    [Fact]
+    public void FollowFocusedWindowsOff_StillTracksTheForegroundForSuppression()
+    {
+        var h = new Harness();
+        h.Canvas.SetWindow((IntPtr)1, 100, 100, 400, 300);
+        h.Canvas.SetWindow((IntPtr)2, 5000, 5000, 400, 300);
+        h.Clock.Now = 10000;
+
+        // Window 1 takes focus while the feature is off, so nothing moves — but
+        // the coordinator must still record that 1 holds the foreground, or the
+        // suppression that follows it closing cannot fire once it is on again.
+        h.Config.FollowFocusedWindows = false;
+        h.Input.RaiseWindowFocused((IntPtr)1);
+
+        h.Config.FollowFocusedWindows = true;
+        h.Canvas.RemoveWindow((IntPtr)1);
+
+        h.Clock.Now = 10200;
+        double camBefore = h.Canvas.CamX;
+        h.Input.RaiseWindowFocused((IntPtr)2);
 
         Assert.Equal(camBefore, h.Canvas.CamX);
     }

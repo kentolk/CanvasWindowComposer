@@ -59,6 +59,38 @@ internal static class CanvasNavigation
         canvas.SetCamera(x, y);
     }
 
+    /// <summary>
+    /// The largest fraction of any single monitor that <paramref name="r"/>
+    /// covers, in the range 0..1. Zero means the window has no pixels anywhere.
+    ///
+    /// Deliberately a fraction of the *screen*, not of the window. Asking how
+    /// much of the window is visible cannot separate the two cases that matter:
+    /// a small window sitting off to one side and a large window hanging off an
+    /// edge can both be 40% visible, and only one of them fills the view.
+    ///
+    /// Per monitor rather than against the whole virtual desktop, because a
+    /// window filling one screen of three covers a third of the desktop, which is
+    /// plainly not "a sliver".
+    /// </summary>
+    public static double ScreenCoverage(WindowRect r, IScreens screens)
+    {
+        if (r.W <= 0 || r.H <= 0) return 0;
+
+        double best = 0;
+        foreach (var bounds in screens.AllBounds)
+        {
+            int overlapW = Math.Min(r.X + r.W, bounds.Right) - Math.Max(r.X, bounds.X);
+            int overlapH = Math.Min(r.Y + r.H, bounds.Bottom) - Math.Max(r.Y, bounds.Y);
+            if (overlapW <= 0 || overlapH <= 0) continue;
+
+            long screenArea = (long)bounds.Width * bounds.Height;
+            if (screenArea <= 0) continue;
+
+            best = Math.Max(best, (long)overlapW * overlapH / (double)screenArea);
+        }
+        return best;
+    }
+
 
     /// <summary>
     /// The window to move to when navigating <paramref name="direction"/> from

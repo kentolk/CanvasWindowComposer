@@ -58,4 +58,66 @@ public class CanvasNavigationTests
 
         Assert.Equal(CamFor(single), CamFor(dual));
     }
+
+    // ==================== ScreenCoverage ====================
+
+    [Fact]
+    public void ScreenCoverage_WindowOffScreenEntirely_IsZero()
+    {
+        var screens = new FakeScreens();
+        Assert.Equal(0, CanvasNavigation.ScreenCoverage(new WindowRect(5000, 5000, 400, 300), screens));
+    }
+
+    [Fact]
+    public void ScreenCoverage_WindowFillingTheMonitor_IsOne()
+    {
+        var screens = new FakeScreens();
+        Assert.Equal(1.0, CanvasNavigation.ScreenCoverage(new WindowRect(0, 0, 1920, 1080), screens), 6);
+    }
+
+    [Fact]
+    public void ScreenCoverage_WindowLargerThanTheMonitor_ClampsAtOne()
+    {
+        var screens = new FakeScreens();
+        Assert.Equal(1.0, CanvasNavigation.ScreenCoverage(new WindowRect(-500, -500, 4000, 3000), screens), 6);
+    }
+
+    [Fact]
+    public void ScreenCoverage_MeasuresTheScreenNotTheWindow()
+    {
+        var screens = new FakeScreens();
+
+        // Both are 40% visible as a fraction of themselves. Only one of them
+        // fills the view, which is the distinction the old rule could not make.
+        var sliver = new WindowRect(1808, 100, 400, 300);      // 112 of 400 wide
+        var hangingOff = new WindowRect(-1152, 0, 1920, 1080); // 768 of 1920 wide
+
+        Assert.True(CanvasNavigation.ScreenCoverage(sliver, screens) < 0.1);
+        Assert.True(CanvasNavigation.ScreenCoverage(hangingOff, screens) > 0.35);
+    }
+
+    [Fact]
+    public void ScreenCoverage_IsPerMonitorNotAcrossTheVirtualDesktop()
+    {
+        // Three monitors side by side. A window filling the middle one covers a
+        // third of the desktop but all of a screen, and is plainly not a sliver.
+        var screens = new FakeScreens
+        {
+            Bounds =
+            {
+                new ScreenRect(1920, 0, 1920, 1080),
+                new ScreenRect(3840, 0, 1920, 1080),
+            }
+        };
+
+        var onSecond = new WindowRect(1920, 0, 1920, 1080);
+        Assert.Equal(1.0, CanvasNavigation.ScreenCoverage(onSecond, screens), 6);
+    }
+
+    [Fact]
+    public void ScreenCoverage_DegenerateRect_IsZero()
+    {
+        var screens = new FakeScreens();
+        Assert.Equal(0, CanvasNavigation.ScreenCoverage(new WindowRect(0, 0, 0, 0), screens));
+    }
 }

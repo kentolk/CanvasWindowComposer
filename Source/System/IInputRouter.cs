@@ -24,6 +24,12 @@ internal interface IInputRouter
     event Action? DragStarted;
     event Action? ButtonDown;
 
+    /// <summary>
+    /// Ctrl+Alt+middle-click at a screen position: centre the canvas on the
+    /// window under that point.
+    /// </summary>
+    event Action<int, int>? CenterRequested;
+
     event Action? SearchHotkey;
     event Action? OverviewHotkey;
 

@@ -57,6 +57,11 @@ internal sealed class FakeWindowApi : IWindowApi
     public IntPtr GetWindowOwner(IntPtr hWnd) =>
         Windows.TryGetValue(hWnd, out var w) ? w.Owner : IntPtr.Zero;
 
+    /// <summary>Test hook: what <see cref="WindowFromPoint"/> should return.</summary>
+    public Func<int, int, IntPtr>? HitTest;
+
+    public IntPtr WindowFromPoint(int x, int y) => HitTest?.Invoke(x, y) ?? IntPtr.Zero;
+
 
     public string GetWindowTitle(IntPtr hWnd) =>
         Windows.TryGetValue(hWnd, out var w) ? w.Title : "";

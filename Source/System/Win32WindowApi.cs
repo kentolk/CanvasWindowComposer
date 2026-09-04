@@ -87,6 +87,17 @@ internal sealed class Win32WindowApi : IWindowApi
         return PInvoke.GetWindow((HWND)hWnd, GET_WINDOW_CMD.GW_OWNER);
     }
 
+    public IntPtr WindowFromPoint(int x, int y)
+    {
+        HWND hit = PInvoke.WindowFromPoint(new System.Drawing.Point(x, y));
+        if (hit == HWND.Null) return IntPtr.Zero;
+
+        // WindowFromPoint lands on whichever child control is under the cursor;
+        // the canvas only deals in top-level windows.
+        HWND root = PInvoke.GetAncestor(hit, GET_ANCESTOR_FLAGS.GA_ROOT);
+        return root == HWND.Null ? hit : root;
+    }
+
 
     public unsafe string GetWindowTitle(IntPtr hWnd)
 

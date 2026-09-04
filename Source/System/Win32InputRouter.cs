@@ -39,6 +39,7 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
     public event Action? InputAvailable;
     public event Action? DragStarted;
     public event Action? ButtonDown;
+    public event Action<int, int>? CenterRequested;
 
     public event Action? SearchHotkey;
     public event Action? OverviewHotkey;
@@ -128,6 +129,9 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
                     break;
                 case MouseEventType.ButtonDown:
                     ButtonDown?.Invoke();
+                    break;
+                case MouseEventType.CenterRequest:
+                    CenterRequested?.Invoke(evt.Dx, evt.Dy);
                     break;
                 case MouseEventType.Pan:
                     _pendingPanDx += evt.Dx;

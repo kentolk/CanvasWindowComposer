@@ -563,6 +563,16 @@ internal sealed class WindowManager : IDisposable
         return (style & (int)WINDOW_STYLE.WS_THICKFRAME) != 0;
     }
 
+    /// <summary>
+    /// The top-level window under a screen point, or zero if there is nothing
+    /// there. Respects the SetWindowRgn clipping applied to off-screen windows,
+    /// so a point over a clipped-away region correctly hits whatever is beneath.
+    /// </summary>
+    public IntPtr WindowAt(int screenX, int screenY)
+    {
+        return _win32.WindowFromPoint(screenX, screenY);
+    }
+
     /// <summary>Raised after a newly discovered window is fully registered.</summary>
 
 

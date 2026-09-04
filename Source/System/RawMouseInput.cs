@@ -376,6 +376,16 @@ internal sealed class RawMouseInput : IDisposable
     private void OnMiddleDown(long ts)
     {
         Point pt = GetCursor();
+
+        // Ctrl+Alt+middle asks to centre the window under the cursor. Checked
+        // before the pan test and returns without setting _dragging, so it never
+        // starts a drag and never announces one.
+        if (IsAltDown() && IsCtrlDown() && !IsShiftDown())
+        {
+            Events.TryEnqueue(new MouseEvent(MouseEventType.CenterRequest, pt.X, pt.Y, ts));
+            return;
+        }
+
         bool alt = !_config.DisableAltPan
                 && IsAltDown()
                 && !IsCtrlDown()

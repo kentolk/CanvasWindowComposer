@@ -57,6 +57,19 @@ internal interface IAppConfig
     bool AutoGridNewWindows { get; }
 
     /// <summary>
+    /// Whether focusing a window with no pixels on any monitor brings the camera
+    /// to it. On, a taskbar-icon click or Alt-Tab travels to a window parked
+    /// elsewhere on the canvas, which would otherwise hold focus while the user
+    /// had no idea where it went. A window with anything at all on screen is left
+    /// alone — they clicked what they could see, so moving the view would be the
+    /// surprise. Off, the camera never moves by itself; reach windows with Alt+S,
+    /// the minimap, or Ctrl+Alt+arrows instead.
+    ///
+    /// Does not gate Ctrl+Alt+middle-click, which is the user asking outright.
+    /// </summary>
+    bool FollowFocusedWindows { get; }
+
+    /// <summary>
     /// Raised after the backing config has been re-read, on the thread that owns
     /// the app (the UI thread for <see cref="AppConfig"/>). Flags that are only
     /// consulted once — hotkey registration, whether the mouse curve exists —
@@ -92,6 +105,7 @@ internal sealed class AppConfig : IAppConfig, IDisposable
     public int GridColumns { get; private set; } = GridArranger.DefaultColumns;
     public bool EnableDragEdgeNavigation { get; private set; }
     public bool AutoGridNewWindows { get; private set; } = true;
+    public bool FollowFocusedWindows { get; private set; } = true;
 
 
 
@@ -131,6 +145,7 @@ internal sealed class AppConfig : IAppConfig, IDisposable
             GridArranger.MinColumns, GridArranger.MaxColumns);
         EnableDragEdgeNavigation = GetBool(values, "EnableDragEdgeNavigation", defaultValue: false);
         AutoGridNewWindows = GetBool(values, "AutoGridNewWindows", defaultValue: true);
+        FollowFocusedWindows = GetBool(values, "FollowFocusedWindows", defaultValue: true);
 
 
     }
@@ -147,6 +162,12 @@ internal sealed class AppConfig : IAppConfig, IDisposable
     {
         AutoGridNewWindows = value;
         WriteBool("AutoGridNewWindows", value);
+    }
+
+    public void SetFollowFocusedWindows(bool value)
+    {
+        FollowFocusedWindows = value;
+        WriteBool("FollowFocusedWindows", value);
     }
 
 
@@ -273,6 +294,12 @@ internal sealed class AppConfig : IAppConfig, IDisposable
 ; canvas is already a grid. Set false for on-demand only (Ctrl+Alt+G).
 ; Dialogs and fixed-size windows are never auto-placed either way.
 ;AutoGridNewWindows=true
+
+; Bring the camera to a focused window that is entirely off screen - a taskbar
+; icon click or Alt-Tab for a window parked elsewhere on the canvas. A window
+; with anything at all on screen is never chased. Set false to stop the camera
+; moving on its own; Ctrl+Alt+middle-click still works either way.
+;FollowFocusedWindows=true
 ");
     }
 

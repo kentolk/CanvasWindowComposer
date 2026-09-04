@@ -30,6 +30,9 @@ internal interface IWindowApi
     /// </summary>
     IntPtr GetWindowOwner(IntPtr hWnd);
 
+    /// <summary>Top-level window under a screen point, or zero.</summary>
+    IntPtr WindowFromPoint(int x, int y);
+
 
     string GetWindowTitle(IntPtr hWnd);
 

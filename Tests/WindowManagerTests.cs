@@ -1035,4 +1035,14 @@ public class WindowManagerTests
 
         Assert.Equal((300, 300, 400, 300), api.GetWindowRect((IntPtr)1));
     }
+
+    [Fact]
+    public void WindowAt_ReturnsTheTopLevelWindowUnderThePoint()
+    {
+        var (canvas, api, wm) = Create();
+        api.HitTest = (x, y) => x == 200 && y == 300 ? (IntPtr)7 : IntPtr.Zero;
+
+        Assert.Equal((IntPtr)7, wm.WindowAt(200, 300));
+        Assert.Equal(IntPtr.Zero, wm.WindowAt(999, 999));
+    }
 }
