@@ -14,6 +14,7 @@ internal sealed class FakeAppConfig : IAppConfig
     public bool EnableDragEdgeNavigation { get; set; }
     public bool AutoGridNewWindows { get; set; } = true;
     public bool FollowFocusedWindows { get; set; } = true;
+    public bool EnableOverviewRightClickResize { get; set; } = true;
 
 
 

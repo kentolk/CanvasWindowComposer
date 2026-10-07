@@ -286,6 +286,38 @@ public class OverviewWindowListTests
     }
 
     [Fact]
+    public void ResizeAt_ChangesSizeAndPreservesPosition()
+    {
+        var (canvas, api, list) = Make();
+        canvas.SetWindow((IntPtr)1, 100, 100, 400, 300);
+        api.AddWindow((IntPtr)1, 100, 100, 400, 300);
+        list.Refresh();
+
+        list.ResizeAt(0, 520, 180);
+
+        var w = list.Windows[0].World;
+        Assert.Equal(100, w.X);
+        Assert.Equal(100, w.Y);
+        Assert.Equal(520, w.W);
+        Assert.Equal(180, w.H);
+    }
+
+    [Fact]
+    public void ResizeAt_ClampsSizeToAtLeastOne()
+    {
+        var (canvas, api, list) = Make();
+        canvas.SetWindow((IntPtr)1, 100, 100, 400, 300);
+        api.AddWindow((IntPtr)1, 100, 100, 400, 300);
+        list.Refresh();
+
+        list.ResizeAt(0, -50, 0);
+
+        var w = list.Windows[0].World;
+        Assert.Equal(1, w.W);
+        Assert.Equal(1, w.H);
+    }
+
+    [Fact]
     public void Clear_EmptiesAndDeselects()
     {
         var (canvas, api, list) = Make();

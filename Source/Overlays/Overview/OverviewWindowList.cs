@@ -145,4 +145,15 @@ internal sealed class OverviewWindowList
         w.Y += worldDy;
         _windows[index] = entry with { World = w };
     }
+
+    /// <summary>Resize the world size of the entry at <paramref name="index"/>.</summary>
+    public void ResizeAt(int index, double worldW, double worldH)
+    {
+        if (index < 0 || index >= _windows.Count) return;
+        var entry = _windows[index];
+        var w = entry.World;
+        w.W = Math.Max(1, worldW);
+        w.H = Math.Max(1, worldH);
+        _windows[index] = entry with { World = w };
+    }
 }

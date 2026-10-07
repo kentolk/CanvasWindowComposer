@@ -70,6 +70,12 @@ internal interface IAppConfig
     bool FollowFocusedWindows { get; }
 
     /// <summary>
+    /// When true (default), right-dragging a window thumbnail in Zooming mode
+    /// resizes that window on the canvas.
+    /// </summary>
+    bool EnableOverviewRightClickResize { get; }
+
+    /// <summary>
     /// Raised after the backing config has been re-read, on the thread that owns
     /// the app (the UI thread for <see cref="AppConfig"/>). Flags that are only
     /// consulted once — hotkey registration, whether the mouse curve exists —
@@ -106,6 +112,7 @@ internal sealed class AppConfig : IAppConfig, IDisposable
     public bool EnableDragEdgeNavigation { get; private set; }
     public bool AutoGridNewWindows { get; private set; } = true;
     public bool FollowFocusedWindows { get; private set; } = true;
+    public bool EnableOverviewRightClickResize { get; private set; } = true;
 
 
 
@@ -146,6 +153,7 @@ internal sealed class AppConfig : IAppConfig, IDisposable
         EnableDragEdgeNavigation = GetBool(values, "EnableDragEdgeNavigation", defaultValue: false);
         AutoGridNewWindows = GetBool(values, "AutoGridNewWindows", defaultValue: true);
         FollowFocusedWindows = GetBool(values, "FollowFocusedWindows", defaultValue: true);
+        EnableOverviewRightClickResize = GetBool(values, "EnableOverviewRightClickResize", defaultValue: true);
 
 
     }
@@ -300,6 +308,9 @@ internal sealed class AppConfig : IAppConfig, IDisposable
 ; with anything at all on screen is never chased. Set false to stop the camera
 ; moving on its own; Ctrl+Alt+middle-click still works either way.
 ;FollowFocusedWindows=true
+
+; Allow resizing windows in overview Zooming mode with right-click drag.
+;EnableOverviewRightClickResize=true
 ");
     }
 

@@ -108,6 +108,7 @@ public class AppConfigTests
         Assert.True(config.ShowScreenFixedWindowsDuringPan);
         Assert.False(config.DisableMouseCurve);
         Assert.False(config.DisableZoomHotkey);
+        Assert.True(config.EnableOverviewRightClickResize);
     }
 
     [Fact]
@@ -120,7 +121,8 @@ public class AppConfigTests
             "DisableGreedyDraw=false",
             "ShowScreenFixedWindowsDuringPan=false",
             "DisableMouseCurve=true",
-            "DisableZoomHotkey=true"));
+            "DisableZoomHotkey=true",
+            "EnableOverviewRightClickResize=false"));
 
         Assert.True(config.DisableSearch);
         Assert.True(config.DisableAltPan);
@@ -128,6 +130,7 @@ public class AppConfigTests
         Assert.False(config.ShowScreenFixedWindowsDuringPan);
         Assert.True(config.DisableMouseCurve);
         Assert.True(config.DisableZoomHotkey);
+        Assert.False(config.EnableOverviewRightClickResize);
     }
 
     // ==================== GRID COLUMNS (non-boolean setting) ====================

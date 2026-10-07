@@ -102,6 +102,10 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
     private bool _draggingWindow;
     private int _dragIndex = -1;
     private int _dragStartVx, _dragStartVy;
+    private bool _resizingWindow;
+    private int _resizeIndex = -1;
+    private int _resizeStartVx, _resizeStartVy;
+    private WorldRect _resizeStartWorld;
 
     public OverviewManager(Canvas mainCanvas, WindowManager wm, IWindowApi win32, IInputRouter input, IAppConfig appConfig, IScreens? screens = null)
     {
@@ -669,6 +673,20 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
             _panStartVx = vx;
             _panStartVy = vy;
         }
+        else if (e.Button == MouseButtons.Right && _appConfig.EnableOverviewRightClickResize)
+        {
+            var (wx, wy) = _camera.WorldFromVirtual(vx, vy);
+            int hit = _windows.HitTest(wx, wy);
+            if (hit >= 0)
+            {
+                BringWindowToFront(hit);
+                _resizingWindow = true;
+                _resizeIndex = 0;
+                _resizeStartVx = vx;
+                _resizeStartVy = vy;
+                _resizeStartWorld = _windows.Windows[0].World;
+            }
+        }
     }
 
     private void HandleMouseMove(OverviewOverlay pass, MouseEventArgs e)
@@ -687,6 +705,18 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
 
             _windows.TranslateAt(_dragIndex, dx, dy);
             var entry = _windows.Windows[_dragIndex];
+            _thumbnails.UpdateWorldRect(entry.HWnd, entry.World);
+
+            _mainCanvas.SetWindow(entry.HWnd, entry.World.X, entry.World.Y, entry.World.W, entry.World.H);
+            _thumbnails.Reconcile();
+        }
+        else if (_resizingWindow && _resizeIndex >= 0 && _resizeIndex < _windows.Count)
+        {
+            double dx = (vx - _resizeStartVx) / _camera.Zoom;
+            double dy = (vy - _resizeStartVy) / _camera.Zoom;
+
+            _windows.ResizeAt(_resizeIndex, _resizeStartWorld.W + dx, _resizeStartWorld.H + dy);
+            var entry = _windows.Windows[_resizeIndex];
             _thumbnails.UpdateWorldRect(entry.HWnd, entry.World);
 
             _mainCanvas.SetWindow(entry.HWnd, entry.World.X, entry.World.Y, entry.World.W, entry.World.H);
@@ -719,6 +749,12 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
             _wm.Reproject(true);
             _draggingWindow = false;
             _dragIndex = -1;
+        }
+        if (_resizingWindow)
+        {
+            _wm.Reproject(true);
+            _resizingWindow = false;
+            _resizeIndex = -1;
         }
         _panning = false;
     }

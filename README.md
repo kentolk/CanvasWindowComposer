@@ -80,6 +80,7 @@ Layout and navigation:
 | `ShowScreenFixedWindowsDuringPan` | `true` | Show pinned / fullscreen windows while panning. Also a tray toggle |
 | `EnableDragEdgeNavigation` | `false` | Hold the left mouse button against a screen edge to advance to the next window |
 | `FollowFocusedWindows` | `true` | Bring the camera to a focused window that is entirely off screen. Also a tray toggle |
+| `EnableOverviewRightClickResize` | `true` | In overview zoom mode, right-click drag a window thumbnail to resize it |
 
 ### Notes
 
