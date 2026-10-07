@@ -14,10 +14,12 @@ Turns your Windows desktop into an infinite, pannable, zoomable canvas. Middle-c
 - **Inertia** — Fling to keep sliding, smooth deceleration
 - **Zoom** — Alt+scroll to zoom in/out around the cursor
 - **Fuzzy search** — Alt+S to find and jump to any window
-- **Minimap** — Canvas overview, fades after inactivity
+- **Minimap** — Canvas overview with app icons, fades after inactivity
 - **Virtual desktops** — Independent canvas per desktop
 - **Auto-focus** — Camera follows focused windows
 - **Off-screen hiding** — Windows hidden when panned out of view
+- **Grid layout** — Arrange windows into screen-sized cells; jump between them with Ctrl+Alt+arrows
+- **Edge navigation** — Optional: hold a drag against a screen edge to advance to the next window
 - **System tray** — Toggle, reset, exit
 
 ## Controls
@@ -26,11 +28,23 @@ Turns your Windows desktop into an infinite, pannable, zoomable canvas. Middle-c
 |---|---|
 | Middle-click drag on desktop | Pan all windows |
 | Alt + middle-click drag anywhere | Pan (works over windows) |
+| Ctrl + Alt + middle-click | Centre the canvas on the window under the cursor, if it fills most of the screen |
 | Alt + Q | Toggle overview (map-view) |
+| Esc | Close the overview |
 | Alt + scroll | Zoom in/out around cursor (opens overview if closed) |
 | Alt + S | Fuzzy window search |
+| Alt + S, then tap S | Cycle the highlighted result; release Alt to jump to it |
+| Alt + S, then Ctrl + Space | Pin/unpin the highlighted window to the screen |
+| Alt + S, then up/down, Enter | Move through results and jump to one |
+| Ctrl + Alt + G | Arrange all windows into a grid of screen-sized cells |
+| Ctrl + Alt + arrows | Jump to the neighbouring window |
 | Tray menu > Enabled | Toggle the canvas on/off |
 | Tray menu > Refresh | Unclip and redraw all windows |
+| Tray menu > Arrange in Grid | Same as Ctrl+Alt+G |
+| Tray menu > Auto-Grid New Windows | Whether new windows join an existing grid |
+| Tray menu > Follow Focused Windows | Whether the camera travels to a focused window that is entirely off screen |
+| Tray menu > Show Pinned/Fullscreen While Panning | Whether screen-fixed windows stay visible during a pan |
+| Tray menu > Open Config Directory | Open the config folder |
 
 ## How it works
 
@@ -40,7 +54,14 @@ Turns your Windows desktop into an infinite, pannable, zoomable canvas. Middle-c
 
 ## Config
 
-A default `config.ini` is written to `%APPDATA%\CanvasWindowComposer\` on first run. Every flag is commented out at its default — uncomment and flip to `true` to opt out of a feature. Changes are picked up live; no restart. Open the folder via **Tray menu > Open Config Directory**.
+A default `config.ini` is written to `%APPDATA%\CanvasWindowComposer\` on first
+run, with every setting commented out at its default. Open the folder via
+**Tray menu > Open Config Directory**.
+
+Every setting below applies live, with no restart — including the ones that own a
+global hotkey, which are re-registered in place when the file changes.
+
+Feature switches — uncomment and set `true` to opt out:
 
 | Flag | Default | Effect when `true` |
 |---|---|---|
@@ -49,6 +70,67 @@ A default `config.ini` is written to `%APPDATA%\CanvasWindowComposer\` on first 
 | `DisableGreedyDraw` | `true` | Skip `SetWindowRgn` clipping of off-screen windows. Keeps Alt-Tab / taskbar thumbnails live at the cost of render work for windows panned out of view |
 | `DisableMouseCurve` | `false` | Send raw HID deltas to the canvas (1 count = 1 pixel) instead of applying Windows' pointer-acceleration curve. Use if you've turned off "Enhance pointer precision" and want linear pan |
 | `DisableZoomHotkey` | `false` | Don't register Alt+Q for the overview. The overview is still reachable by starting a pan |
+
+Layout and navigation:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `GridColumns` | `3` | Columns used by **Arrange in Grid**. Clamped to `1`–`32` |
+| `AutoGridNewWindows` | `true` | Drop newly opened windows into the first free cell. Also a tray toggle |
+| `ShowScreenFixedWindowsDuringPan` | `true` | Show pinned / fullscreen windows while panning. Also a tray toggle |
+| `EnableDragEdgeNavigation` | `false` | Hold the left mouse button against a screen edge to advance to the next window |
+| `FollowFocusedWindows` | `true` | Bring the camera to a focused window that is entirely off screen. Also a tray toggle |
+
+### Notes
+
+**The minimap shows app icons and pinned state.** Each window is drawn with its
+application icon so you can find one at a glance, and windows pinned to the
+screen are drawn red. Pinned windows stop being reprojected, so they sit still
+while the canvas moves around them - showing them in red is what makes that
+distinguishable from a window that is simply stuck.
+
+**Grid cells are monitor-sized.** A window placed in a cell fills the screen while
+staying an ordinary pannable canvas window — which is why you never need to
+maximize. A real maximized window is excluded from the canvas entirely, and
+Windows re-snaps it if anything tries to move it.
+
+**Auto-grid only fires on an intact grid.** New windows join the layout only while
+*every* window is already on a cell, so it never disturbs an arrangement you made
+by hand. Set `AutoGridNewWindows=false` for on-demand gridding only.
+
+**Dialogs never get a cell**, whether auto-placed or arranged by hand. A window is
+grid-eligible only if it has no owner window and is resizable (`WS_THICKFRAME`):
+a "rename branch" dialog belongs beside the window that opened it, and a
+fixed-size window can't fill a cell anyway. Dialogs still live on the canvas and
+pan with everything else.
+
+**The camera moves by itself for one reason only: you focused a window that is
+not on screen at all.** A taskbar-icon click or Alt-Tab for a window parked
+elsewhere on the canvas brings it to you, because otherwise it holds focus while
+you have no idea where it went. A window with anything at all on screen is left
+alone — you clicked the part you could see, and hauling the view across to it is
+a jump you did not ask for. Pinned windows are never chased, and
+`FollowFocusedWindows=false` turns even the off-screen case off.
+
+**Ctrl+Alt+middle-click squares up the window under the cursor**, when that window
+already covers at least 70% of a monitor. This is the "most of my screen is this
+window, but it is hanging off an edge" case — it used to happen automatically,
+which fired too rarely to be predictable, so it is now something you ask for. The
+coverage gate is what stops it becoming "centre whatever I clicked": a window off
+to one side is deliberately left where it is. Adjust the threshold at
+`CanvasNavigator.MinCoverageToCenter`.
+
+The measure is how much of the *screen* the window covers, not how much of the
+window is visible. Those come apart exactly where it matters — a small window off
+to the side and a large window hanging off an edge can both be 40% visible, and
+only one of them fills the view.
+
+**Edge navigation is a heuristic, not a drag detector.** A drag-and-drop running in
+another application is invisible from here — `DoDragDrop` is a modal loop inside
+the source process and exposes nothing — so "left button held against the edge"
+is the only signal available, and that also describes selecting text to the edge
+of the screen. A ~0.4s dwell keeps incidental holds from triggering it, which is
+why the setting is opt-in.
 
 ## Requirements
 
@@ -59,8 +141,11 @@ A default `config.ini` is written to `%APPDATA%\CanvasWindowComposer\` on first 
 ## Build
 
 ```bash
-# C# app
-dotnet build
+# C# app — the build is warning-clean, so keep it that way
+dotnet build CanvasDesktop.csproj -warnaserror
+
+# Tests (no elevation needed; everything runs against fakes)
+dotnet test Tests\CanvasDesktop.Tests.csproj
 
 # Installer (optional)
 Install\build-installer.bat

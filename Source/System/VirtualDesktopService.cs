@@ -32,14 +32,17 @@ internal sealed class VirtualDesktopService : IVirtualDesktops, IDisposable
     private readonly System.Threading.SynchronizationContext? _uiContext;
     private readonly System.Threading.ManualResetEventSlim _stop = new(false);
     private readonly System.Threading.Thread? _pollThread;
+    // Written on the poll thread, read on the UI thread. Guid is 16 bytes, so
+    // an unsynchronised read can tear into a value that was never current.
+    private readonly object _idLock = new();
     private Guid _currentDesktopId;
 
     public Guid CurrentDesktopId
     {
-        get { return _currentDesktopId; }
+        get { lock (_idLock) { return _currentDesktopId; } }
     }
 
-    public event Action? DesktopChanged;
+    public event Action<Guid>? DesktopChanged;
 
     public VirtualDesktopService()
     {
@@ -79,16 +82,24 @@ internal sealed class VirtualDesktopService : IVirtualDesktops, IDisposable
             try
             {
                 Guid newId = DetectCurrentDesktop();
-                if (newId == Guid.Empty || newId == _currentDesktopId) continue;
+                if (newId == Guid.Empty) continue;
 
-                _currentDesktopId = newId;
-                Action? handler = DesktopChanged;
+                lock (_idLock)
+                {
+                    if (newId == _currentDesktopId) continue;
+                    _currentDesktopId = newId;
+                }
+
+                Action<Guid>? handler = DesktopChanged;
                 if (handler == null) continue;
 
+                // Capture the id in the closure. Re-reading CurrentDesktopId from
+                // the handler would race a subsequent switch and file the outgoing
+                // desktop's canvas under the wrong key.
                 if (_uiContext != null)
-                    _uiContext.Post(_ => handler.Invoke(), null);
+                    _uiContext.Post(_ => handler.Invoke(newId), null);
                 else
-                    handler.Invoke();
+                    handler.Invoke(newId);
             }
             catch
             {

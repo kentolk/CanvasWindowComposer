@@ -118,4 +118,74 @@ public class OverviewCameraTests
         Assert.Equal(960, vx);
         Assert.Equal(540, vy);
     }
+
+    [Fact]
+    public void ZoomToCursor_AtZoomMax_ZoomingInIsANoOp()
+    {
+        var cam = new OverviewCamera(new FakeScreens());
+        cam.SetTo(100, 200, OverviewCamera.ZoomMax);
+
+        Assert.False(cam.ZoomToCursor(960, 540, notches: 5));
+        Assert.Equal(100, cam.X);
+        Assert.Equal(200, cam.Y);
+        Assert.Equal(OverviewCamera.ZoomMax, cam.Zoom);
+    }
+
+    [Fact]
+    public void ZoomToCursor_AtZoomMin_ZoomingOutIsANoOp()
+    {
+        var cam = new OverviewCamera(new FakeScreens());
+        cam.SetTo(100, 200, OverviewCamera.ZoomMin);
+
+        Assert.False(cam.ZoomToCursor(960, 540, notches: -5));
+        Assert.Equal(100, cam.X);
+        Assert.Equal(200, cam.Y);
+        Assert.Equal(OverviewCamera.ZoomMin, cam.Zoom);
+    }
+
+    [Fact]
+    public void ZoomToCursor_ZeroNotches_ReturnsFalseAndDoesNotMove()
+    {
+        var cam = new OverviewCamera(new FakeScreens());
+        cam.SetTo(100, 200, 0.5);
+
+        Assert.False(cam.ZoomToCursor(960, 540, notches: 0));
+        Assert.Equal(100, cam.X);
+        Assert.Equal(200, cam.Y);
+        Assert.Equal(0.5, cam.Zoom);
+    }
+
+    [Fact]
+    public void ZoomToCursor_KeepsCursorAnchoredAcrossRepeatedSteps()
+    {
+        var cam = new OverviewCamera(new FakeScreens());
+        cam.SetTo(0, 0, 1.0);
+
+        const int cx = 640, cy = 360;
+        var (wx, wy) = cam.WorldFromVirtual(cx, cy);
+
+        for (int i = 0; i < 20; i++)
+            cam.ZoomToCursor(cx, cy, notches: -1);
+
+        // Drift accumulates over a long zoom-out gesture; the point under the
+        // cursor must still be the point under the cursor.
+        var (wx2, wy2) = cam.WorldFromVirtual(cx, cy);
+        Assert.InRange(wx2, wx - 1.0, wx + 1.0);
+        Assert.InRange(wy2, wy - 1.0, wy + 1.0);
+    }
+
+    [Fact]
+    public void ZoomToCursor_NeverEscapesTheClampRange()
+    {
+        var cam = new OverviewCamera(new FakeScreens());
+        cam.SetTo(0, 0, 1.0);
+
+        for (int i = 0; i < 200; i++)
+            cam.ZoomToCursor(500, 500, notches: -3);
+        Assert.Equal(OverviewCamera.ZoomMin, cam.Zoom);
+
+        for (int i = 0; i < 200; i++)
+            cam.ZoomToCursor(500, 500, notches: 3);
+        Assert.Equal(OverviewCamera.ZoomMax, cam.Zoom);
+    }
 }

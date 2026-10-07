@@ -83,6 +83,13 @@ internal sealed class OverviewThumbnails
     }
     private readonly Dictionary<OverviewOverlay, List<ActiveEntry>> _windowsByPass = new();
 
+    // True while any registered entry is ScreenFixed. Those entries read their
+    // rect live from GetWindowRect instead of projecting the camera, so the
+    // "camera unchanged => rects unchanged" early-out in UpdateWindowRects does
+    // not hold for them: a pinned window moved while the camera sat still would
+    // leave its thumbnail behind at the old position.
+    private bool _hasScreenFixedEntries;
+
     // Scratch target per pass (z-descending), reused across Reconcile calls.
     private readonly Dictionary<OverviewOverlay, List<OverviewWindowList.Entry>> _scratchTargetByPass = new();
 
@@ -121,10 +128,12 @@ internal sealed class OverviewThumbnails
                 PInvoke.DwmUnregisterThumbnail(entry.Thumb);
         }
         _windowsByPass.Clear();
+        _hasScreenFixedEntries = false;
 
         foreach (var pass in _passes)
         {
             UnregisterTaskbars(pass);
+
             UnregisterDesktop(pass);
         }
     }
@@ -545,8 +554,22 @@ internal sealed class OverviewThumbnails
             }
         }
 
+        _hasScreenFixedEntries = AnyScreenFixed();
         return appended;
     }
+
+    private bool AnyScreenFixed()
+    {
+        foreach (var kv in _windowsByPass)
+        {
+            foreach (var entry in kv.Value)
+            {
+                if (entry.ScreenFixed) return true;
+            }
+        }
+        return false;
+    }
+
 
     /// <summary>
     /// One-shot visibility toggle for a freshly registered thumbnail. Newly
@@ -569,8 +592,10 @@ internal sealed class OverviewThumbnails
         double camX = _camera.X;
         double camY = _camera.Y;
 
-        if (camX == _lastPushedCamX && camY == _lastPushedCamY && zoom == _lastPushedZoom)
+        if (!_hasScreenFixedEntries &&
+            camX == _lastPushedCamX && camY == _lastPushedCamY && zoom == _lastPushedZoom)
             return;
+
         _lastPushedCamX = camX;
         _lastPushedCamY = camY;
         _lastPushedZoom = zoom;

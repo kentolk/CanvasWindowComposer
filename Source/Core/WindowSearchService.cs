@@ -14,6 +14,11 @@ internal sealed class WindowSearchService
 {
     private readonly Canvas _canvas;
     private readonly IWindowApi _win32;
+    // Process metadata is expensive (Process.GetProcessById + MainModule) and many
+    // windows share a pid, so it is cached across one search session.
+    // SearchOverlay.Toggle calls ClearCache on every open, which bounds the
+    // lifetime to a single session — short enough that pid reuse is not a
+    // concern. Anything that starts holding this longer needs to revisit that.
     private readonly Dictionary<uint, (string name, string exe)> _processCache = new();
 
     public WindowSearchService(Canvas canvas, IWindowApi win32)

@@ -54,6 +54,8 @@ FindWindowEx
 WindowFromPoint
 SetForegroundWindow
 GetParent
+GetWindow
+GET_WINDOW_CMD
 GetAncestor
 GetWindowThreadProcessId
 GetClassName
@@ -74,6 +76,10 @@ LAYERED_WINDOW_ATTRIBUTES_FLAGS
 SetWindowRgn
 CreateRectRgn
 CreateRoundRectRgn
+DeleteObject
+
+// Icons
+DestroyIcon
 
 // Deferred window positioning
 BeginDeferWindowPos

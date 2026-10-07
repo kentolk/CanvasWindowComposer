@@ -394,6 +394,37 @@ public class CanvasTests
         Assert.Null(canvas.GetWorldExtents());
     }
 
+    // ==================== Z-ORDER ====================
+
+    [Fact]
+    public void BringToForeground_StampsIncreasingZOrder()
+    {
+        var canvas = new Canvas();
+        canvas.SetWindow((IntPtr)1, 0, 0, 800, 600);
+        canvas.SetWindow((IntPtr)2, 0, 0, 800, 600);
+
+        canvas.BringToForeground((IntPtr)1);
+        canvas.BringToForeground((IntPtr)2);
+
+        Assert.True(canvas.Windows[(IntPtr)2].ZOrder > canvas.Windows[(IntPtr)1].ZOrder);
+    }
+
+    [Fact]
+    public void CollapseWindow_StampsMinimizedZOrderSentinel()
+    {
+        var canvas = new Canvas();
+        canvas.SetWindow((IntPtr)1, 0, 0, 800, 600);
+        canvas.BringToForeground((IntPtr)1);
+        Assert.True(canvas.Windows[(IntPtr)1].ZOrder > 0);
+
+        canvas.CollapseWindow((IntPtr)1);
+
+        // Minimizing drops the window out of the foreground ordering. Consumers
+        // filter on State today, but the sentinel has to actually be stored or
+        // anything that starts trusting ZOrder silently reads a stale stamp.
+        Assert.Equal(-1, canvas.Windows[(IntPtr)1].ZOrder);
+    }
+
     // ==================== PINNED TO SCREEN ====================
 
     [Fact]
@@ -420,8 +451,13 @@ public class CanvasTests
     }
 
     [Fact]
-    public void GetWorldExtents_ExcludesPinnedWindows()
+    public void GetWorldExtents_IncludesPinnedWindows()
     {
+        // The minimap draws pinned windows (in red) so the user can see that a
+        // window has stopped following the canvas. Excluding them from the
+        // extents would push them outside the map area and clip them straight
+        // back out of sight, which is the state that made an accidental pin so
+        // hard to diagnose in the first place.
         var canvas = new Canvas();
         canvas.SetWindow((IntPtr)1, 0, 0, 100, 100);
         canvas.SetWindow((IntPtr)2, 5000, 5000, 200, 200);
@@ -430,9 +466,25 @@ public class CanvasTests
         var ext = canvas.GetWorldExtents();
         Assert.NotNull(ext);
         var (_, _, maxX, maxY) = ext.Value;
+        Assert.Equal(5200, maxX);
+        Assert.Equal(5200, maxY);
+    }
+
+    [Fact]
+    public void GetWorldExtents_StillExcludesMinimizedWindows()
+    {
+        var canvas = new Canvas();
+        canvas.SetWindow((IntPtr)1, 0, 0, 100, 100);
+        canvas.SetWindow((IntPtr)2, 5000, 5000, 200, 200);
+        canvas.CollapseWindow((IntPtr)2);
+
+        var ext = canvas.GetWorldExtents();
+        Assert.NotNull(ext);
+        var (_, _, maxX, maxY) = ext.Value;
         Assert.Equal(100, maxX);
         Assert.Equal(100, maxY);
     }
+
 
     [Fact]
     public void SaveState_PersistsPinned()

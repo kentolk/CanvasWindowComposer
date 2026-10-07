@@ -19,6 +19,7 @@ namespace CanvasDesktop;
 /// </summary>
 internal sealed class Win32InputRouter : IInputRouter, IDisposable
 {
+    private readonly IAppConfig _config;
     private readonly RawMouseInput _mouse;
     private readonly MessageWindow _msgWindow;
     private readonly Win32EventRouter _winEvents;
@@ -38,8 +39,13 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
     public event Action? InputAvailable;
     public event Action? DragStarted;
     public event Action? ButtonDown;
+    public event Action<int, int>? CenterRequested;
+
     public event Action? SearchHotkey;
     public event Action? OverviewHotkey;
+    public event Action<NavDirection>? NavigateHotkey;
+    public event Action? ArrangeGridHotkey;
+
     public event Action? EscPressed;
 
     public void EnableEscHotkey()
@@ -62,12 +68,17 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
 
     public Win32InputRouter(IAppConfig config)
     {
+        _config = config;
         _mouse = new RawMouseInput(config, OnInputFrame);
 
         _msgWindow = new MessageWindow();
-        _msgWindow.RegisterHandlers(
-            onSearchHotkey:   config.DisableSearch     ? null : () => SearchHotkey?.Invoke(),
-            onOverviewHotkey: config.DisableZoomHotkey ? null : () => OverviewHotkey?.Invoke());
+        _msgWindow.RegisterNavigationHandlers(
+            onNavigate:    d => NavigateHotkey?.Invoke(d),
+            onArrangeGrid: () => ArrangeGridHotkey?.Invoke());
+        ApplyHotkeyConfig();
+
+        config.Changed += OnConfigChanged;
+
 
         _winEvents = new Win32EventRouter();
         _winEvents.WindowMinimized += h => WindowMinimized?.Invoke(h);
@@ -80,6 +91,23 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
         _winEvents.AltTabEnded     += () => AltTabEnded?.Invoke();
 
         _mouse.Install();
+    }
+
+    private void OnConfigChanged()
+    {
+        ApplyHotkeyConfig();
+    }
+
+    /// <summary>
+    /// Register or release the global hotkeys to match current config. Called at
+    /// construction and again whenever config.ini changes, so DisableSearch and
+    /// DisableZoomHotkey take effect without a restart.
+    /// </summary>
+    private void ApplyHotkeyConfig()
+    {
+        _msgWindow.RegisterHandlers(
+            onSearchHotkey:   _config.DisableSearch     ? null : () => SearchHotkey?.Invoke(),
+            onOverviewHotkey: _config.DisableZoomHotkey ? null : () => OverviewHotkey?.Invoke());
     }
 
     /// <summary>
@@ -101,6 +129,9 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
                     break;
                 case MouseEventType.ButtonDown:
                     ButtonDown?.Invoke();
+                    break;
+                case MouseEventType.CenterRequest:
+                    CenterRequested?.Invoke(evt.Dx, evt.Dy);
                     break;
                 case MouseEventType.Pan:
                     _pendingPanDx += evt.Dx;
@@ -205,7 +236,9 @@ internal sealed class Win32InputRouter : IInputRouter, IDisposable
 
     public void Dispose()
     {
+        _config.Changed -= OnConfigChanged;
         DisableMiddleButtonBlock();
+
         _winEvents.Dispose();
         _mouse.Dispose();
         _msgWindow.Dispose();

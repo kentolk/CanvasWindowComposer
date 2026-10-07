@@ -9,13 +9,28 @@ internal enum MouseEventType : byte
     Pan,
     ButtonDown,
     Zoom,
+
+    /// <summary>
+    /// Ctrl+Alt+middle-click: centre the canvas on the window under the cursor.
+    /// Dx/Dy carry the cursor position, not a delta.
+    /// </summary>
+    CenterRequest,
 }
+
 
 internal readonly struct MouseEvent
 {
     public readonly MouseEventType Type;
+
+    /// <summary>
+    /// Motion delta for <see cref="MouseEventType.Pan"/>. For
+    /// <see cref="MouseEventType.CenterRequest"/> these carry the screen position
+    /// of the cursor instead — the consumer needs to know *where* the click
+    /// landed, not how far it moved.
+    /// </summary>
     public readonly int Dx;
     public readonly int Dy;
+
 
     /// <summary>
     /// Stopwatch.GetTimestamp() ticks at the moment the event was parsed off

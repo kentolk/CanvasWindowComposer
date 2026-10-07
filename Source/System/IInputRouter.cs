@@ -24,8 +24,21 @@ internal interface IInputRouter
     event Action? DragStarted;
     event Action? ButtonDown;
 
+    /// <summary>
+    /// Ctrl+Alt+middle-click at a screen position: centre the canvas on the
+    /// window under that point.
+    /// </summary>
+    event Action<int, int>? CenterRequested;
+
     event Action? SearchHotkey;
     event Action? OverviewHotkey;
+
+    /// <summary>Ctrl+Alt+Arrow: jump the camera to the neighbouring window.</summary>
+    event Action<NavDirection>? NavigateHotkey;
+
+    /// <summary>Ctrl+Alt+G: lay the canvas out in a grid.</summary>
+    event Action? ArrangeGridHotkey;
+
 
     /// <summary>
     /// Raised when the user presses Esc while the Esc hotkey is enabled.

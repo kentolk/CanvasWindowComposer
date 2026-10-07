@@ -24,7 +24,19 @@ internal sealed class Win32WindowApi : IWindowApi
         "Shell_TrayWnd",
         "Shell_SecondaryTrayWnd",
         "NotifyIconOverflowWindow",
-        "Windows.UI.Core.CoreWindow"
+        "Windows.UI.Core.CoreWindow",
+
+        // Win11 shell surfaces: taskbar thumbnail previews, Task View, Alt-Tab.
+        // Unowned, unparented, WS_VISIBLE and uncloaked for as long as they are
+        // on screen, so they pass every other test here and get registered as
+        // ordinary windows — which puts a phantom on the minimap, hands the
+        // reprojector a shell window to move around, and makes the canvas churn
+        // (and previously blackout recentring) every time the pointer crosses
+        // the taskbar.
+        "XamlExplorerHostIslandWindow",
+        "TaskListThumbnailWnd",
+        "MultitaskingViewFrame",
+        "ForegroundStaging"
     };
 
     public bool IsWindowVisible(IntPtr hWnd)
@@ -70,7 +82,25 @@ internal sealed class Win32WindowApi : IWindowApi
         return pid;
     }
 
+    public IntPtr GetWindowOwner(IntPtr hWnd)
+    {
+        return PInvoke.GetWindow((HWND)hWnd, GET_WINDOW_CMD.GW_OWNER);
+    }
+
+    public IntPtr WindowFromPoint(int x, int y)
+    {
+        HWND hit = PInvoke.WindowFromPoint(new System.Drawing.Point(x, y));
+        if (hit == HWND.Null) return IntPtr.Zero;
+
+        // WindowFromPoint lands on whichever child control is under the cursor;
+        // the canvas only deals in top-level windows.
+        HWND root = PInvoke.GetAncestor(hit, GET_ANCESTOR_FLAGS.GA_ROOT);
+        return root == HWND.Null ? hit : root;
+    }
+
+
     public unsafe string GetWindowTitle(IntPtr hWnd)
+
     {
         HWND h = (HWND)hWnd;
         int len = PInvoke.GetWindowTextLength(h);
@@ -99,7 +129,58 @@ internal sealed class Win32WindowApi : IWindowApi
         }
     }
 
+    public byte[]? GetProcessIconBgra(uint pid, int sizePx)
+    {
+        try
+        {
+            using var proc = Process.GetProcessById((int)pid);
+            string? path = proc.MainModule?.FileName;
+            if (string.IsNullOrEmpty(path)) return null;
+
+            // ExtractAssociatedIcon rather than WM_GETICON: no cross-process
+            // SendMessage, so an unresponsive app can't stall the UI thread.
+            using var icon = System.Drawing.Icon.ExtractAssociatedIcon(path);
+            if (icon == null) return null;
+
+            using var bmp = new System.Drawing.Bitmap(sizePx, sizePx,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = System.Drawing.Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.Clear(System.Drawing.Color.Transparent);
+                using var bitmapIcon = icon.ToBitmap();
+                g.DrawImage(bitmapIcon, 0, 0, sizePx, sizePx);
+            }
+
+            var rect = new System.Drawing.Rectangle(0, 0, sizePx, sizePx);
+            var data = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try
+            {
+                // Format32bppArgb is BGRA in memory on little-endian, which is
+                // what DXGI_FORMAT_B8G8R8A8_UNORM wants.
+                var pixels = new byte[sizePx * sizePx * 4];
+                for (int y = 0; y < sizePx; y++)
+                {
+                    IntPtr row = data.Scan0 + y * data.Stride;
+                    System.Runtime.InteropServices.Marshal.Copy(row, pixels, y * sizePx * 4, sizePx * 4);
+                }
+                return pixels;
+            }
+            finally
+            {
+                bmp.UnlockBits(data);
+            }
+        }
+        catch
+        {
+            // Protected or exited process, or an exe with no icon resource.
+            return null;
+        }
+    }
+
     public unsafe bool IsManageable(IntPtr hWnd, uint ownPid, bool allowMinimized = false)
+
     {
         HWND h = (HWND)hWnd;
         if (!PInvoke.IsWindowVisible(h))
@@ -151,7 +232,15 @@ internal sealed class Win32WindowApi : IWindowApi
         PInvoke.SetWindowPos((HWND)hWnd, HWND.Null, x, y, w, h, (SET_WINDOW_POS_FLAGS)flags);
     }
 
+    public unsafe void InvalidateWindow(IntPtr hWnd)
+    {
+        PInvoke.RedrawWindow((HWND)hWnd, null, (HRGN)IntPtr.Zero,
+            REDRAW_WINDOW_FLAGS.RDW_INVALIDATE | REDRAW_WINDOW_FLAGS.RDW_ERASE |
+            REDRAW_WINDOW_FLAGS.RDW_ALLCHILDREN);
+    }
+
     public void ClipWindow(IntPtr hWnd)
+
     {
         HRGN rgn = PInvoke.CreateRectRgn(0, 0, 0, 0);
         _ = PInvoke.SetWindowRgn((HWND)hWnd, rgn, true);
@@ -169,6 +258,7 @@ internal sealed class Win32WindowApi : IWindowApi
 
         HDWP hdwp = PInvoke.BeginDeferWindowPos(items.Count);
         bool useBatch = hdwp != default(HDWP);
+        int deferred = 0; // items currently riding on hdwp
 
         try
         {
@@ -179,10 +269,7 @@ internal sealed class Win32WindowApi : IWindowApi
                 if (ct.IsCancellationRequested)
                     return;
 
-                SET_WINDOW_POS_FLAGS flags = SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE;
-                if (item.PosOnly)  flags |= SET_WINDOW_POS_FLAGS.SWP_NOSIZE;
-                if (isAsync)       flags |= SET_WINDOW_POS_FLAGS.SWP_ASYNCWINDOWPOS;
-                if (isTransient)   flags |= SET_WINDOW_POS_FLAGS.SWP_NOSENDCHANGING;
+                SET_WINDOW_POS_FLAGS flags = FlagsFor(item, isAsync, isTransient);
 
                 HWND target = (HWND)item.HWnd;
                 var r = item.Rect;
@@ -191,8 +278,17 @@ internal sealed class Win32WindowApi : IWindowApi
                     hdwp = PInvoke.DeferWindowPos(hdwp, target, HWND.Null, r.X, r.Y, r.W, r.H, flags);
                     if (hdwp == default(HDWP))
                     {
+                        // DeferWindowPos destroys the HDWP when it fails, and every
+                        // move already queued on it goes with it. Replay those
+                        // individually before falling back, otherwise a mid-batch
+                        // failure silently strands the windows processed so far.
                         useBatch = false;
+                        ApplyRange(items, 0, deferred, isAsync, isTransient);
                         PInvoke.SetWindowPos(target, HWND.Null, r.X, r.Y, r.W, r.H, flags);
+                    }
+                    else
+                    {
+                        deferred++;
                     }
                 }
                 else
@@ -208,7 +304,29 @@ internal sealed class Win32WindowApi : IWindowApi
         }
     }
 
+    private static SET_WINDOW_POS_FLAGS FlagsFor(BatchMoveItem item, bool isAsync, bool isTransient)
+    {
+        SET_WINDOW_POS_FLAGS flags = SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE;
+        if (item.PosOnly)  flags |= SET_WINDOW_POS_FLAGS.SWP_NOSIZE;
+        if (isAsync)       flags |= SET_WINDOW_POS_FLAGS.SWP_ASYNCWINDOWPOS;
+        if (isTransient)   flags |= SET_WINDOW_POS_FLAGS.SWP_NOSENDCHANGING;
+        return flags;
+    }
+
+    /// <summary>Apply items [start, end) one at a time, bypassing the defer batch.</summary>
+    private static void ApplyRange(List<BatchMoveItem> items, int start, int end, bool isAsync, bool isTransient)
+    {
+        for (int i = start; i < end; i++)
+        {
+            var it = items[i];
+            var r = it.Rect;
+            PInvoke.SetWindowPos((HWND)it.HWnd, HWND.Null, r.X, r.Y, r.W, r.H,
+                FlagsFor(it, isAsync, isTransient));
+        }
+    }
+
     public unsafe void EnumWindows(Func<IntPtr, bool> callback)
+
     {
         WNDENUMPROC proc = (HWND hWnd, LPARAM _) => callback(hWnd);
         PInvoke.EnumWindows(proc, 0);

@@ -33,6 +33,8 @@ internal sealed class MinimapOverlay : Form
 
     private readonly Canvas _canvas;
     private readonly IScreens _screens;
+    private readonly IWindowApi _win32;
+
     private readonly MinimapRenderer _renderer = new();
     private readonly Action _applyFadeOnUi;
     private bool _rendererInitialized;
@@ -43,8 +45,13 @@ internal sealed class MinimapOverlay : Form
 
     // Scratch buffer reused across snapshots, refilled per snapshot by
     // sorting Canvas.Windows by WorldRect.ZOrder descending (topmost first).
-    private readonly List<WorldRect> _orderedWindows = new();
-    private static readonly Comparison<WorldRect> ZOrderDescending = (a, b) => b.ZOrder.CompareTo(a.ZOrder);
+    private readonly List<(IntPtr HWnd, WorldRect Rect)> _orderedWindows = new();
+    private readonly List<MinimapWindow> _snapshot = new();
+    private static readonly Comparison<(IntPtr HWnd, WorldRect Rect)> ZOrderDescending =
+        (a, b) => b.Rect.ZOrder.CompareTo(a.Rect.ZOrder);
+
+    private readonly IconSlotCache _iconSlots;
+
 
     protected override CreateParams CreateParams
     {
@@ -62,10 +69,16 @@ internal sealed class MinimapOverlay : Form
         get { return true; }
     }
 
-    public MinimapOverlay(Canvas canvas, IInputRouter input, DesktopStateCache desktops, IScreens? screens = null)
+    public MinimapOverlay(Canvas canvas, IInputRouter input, DesktopStateCache desktops,
+        IWindowApi win32, IScreens? screens = null)
     {
         _canvas = canvas;
+        _win32 = win32;
+        _iconSlots = new IconSlotCache(
+            win32, MinimapRenderer.IconSlotCount, MinimapRenderer.IconPx, _renderer.SetIcon);
+
         _screens = screens ?? WinFormsScreens.Instance;
+
         _applyFadeOnUi = ApplyFadeOnUi;
 
         FormBorderStyle = FormBorderStyle.None;
@@ -85,18 +98,26 @@ internal sealed class MinimapOverlay : Form
         canvas.FrontChanged        += _ => RefreshSnapshotIfVisible();
         input.DragStarted          += BringToFront;
         desktops.AfterStateLoaded  += NotifyCanvasChanged;
+        canvas.WindowRemoved       += hWnd => _iconSlots.Forget(hWnd);
+
+
     }
 
     /// <summary>Called on canvas changes + by <see cref="DesktopStateCache"/> after restore.</summary>
     public void NotifyCanvasChanged()
     {
-        PositionOnScreen();
         EnsureRendererInitialized();
         RebuildSnapshot();
 
         _touchTicks = Environment.TickCount64;
         if (!Visible)
         {
+            // Only when (re)showing. This fires on every camera change — i.e.
+            // every input frame during a pan — and PositionOnScreen reaches
+            // Screen.PrimaryScreen, which re-enumerates monitors each call. The
+            // minimap fades out and comes back constantly, so placement still
+            // tracks display changes without paying for it per frame.
+            PositionOnScreen();
             Opacity = MinimapOpacity;
             _lastAppliedOpacity = MinimapOpacity;
             Show();
@@ -119,18 +140,30 @@ internal sealed class MinimapOverlay : Form
     {
         _orderedWindows.Clear();
         foreach (var kv in _canvas.Windows)
-            if (kv.Value.State == CanvasDesktop.WindowState.Normal && !kv.Value.PinnedToScreen)
-                _orderedWindows.Add(kv.Value);
+        {
+            // Pinned windows are included deliberately. They stop being
+            // reprojected, so on screen they sit still while everything else
+            // moves — and while they were hidden here there was no way to tell a
+            // pinned window from a broken one. The renderer draws them red.
+            if (kv.Value.State == CanvasDesktop.WindowState.Normal)
+                _orderedWindows.Add((kv.Key, kv.Value));
+        }
         _orderedWindows.Sort(ZOrderDescending);
+
+        _snapshot.Clear();
+        foreach (var (hWnd, rect) in _orderedWindows)
+            _snapshot.Add(new MinimapWindow(rect, _iconSlots.SlotFor(hWnd)));
 
         var primary = _screens.PrimaryBounds;
         _renderer.UpdateSnapshot(
-            _orderedWindows,
+            _snapshot,
+
             _canvas.GetWorldExtents(),
             _canvas.GetViewport(primary.Width, primary.Height));
     }
 
     private void EnsureRendererInitialized()
+
     {
         if (_rendererInitialized) return;
         _ = Handle; // force HWND

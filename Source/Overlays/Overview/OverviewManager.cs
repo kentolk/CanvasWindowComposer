@@ -28,6 +28,12 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
 
     private const double ExtentsPaddingRatio = 0.1;
     private const double MouseWheelDeltaPerNotch = 120.0;
+
+    // How often the UI thread checks that a fling-closed overview actually got
+    // closed. Long enough to stay out of the render thread's way, short enough
+    // that a missed frame tick isn't perceptible.
+    private const int PanningWatchdogMs = 250;
+
     private static readonly string[] MyDockFinderProcessHints =
     {
         "mydockfinder",
@@ -41,12 +47,30 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
     };
 
     private readonly InertiaTracker _inertia = new();
+
+    // Safety net for the one state the overview can get stuck in. Releasing a
+    // pan with velocity leaves the overview in Panning and hands the ONLY exit
+    // to OnGridFrameTick — which runs on the grid render thread. If that thread
+    // stalls, loses a wake-up, or its form handle goes away, Panning never ends:
+    // the overlay stays up and the WH_MOUSE_LL middle-click block stays
+    // installed. The next click is then swallowed by OnMouseButtonDown closing
+    // the overview instead of reaching the window under the cursor, so focusing
+    // a window takes two clicks. Armed only while inertia is gliding.
+    private readonly Timer _panningWatchdog;
+
     private readonly object _inertiaQueueLock = new();
     private int _pendingInertiaDx, _pendingInertiaDy;
     private bool _inertiaPanQueued;
 
     // Per-monitor passes
     private readonly List<OverviewOverlay> _passes = new();
+
+    // The form the grid render thread marshals inertia callbacks through.
+    // Published by the UI thread whenever _passes is (re)built. The render
+    // thread must read this instead of indexing _passes: OnDisplaySettingsChanged
+    // clears and rebuilds that list, and an IndexOutOfRange / ObjectDisposed
+    // thrown on a render thread takes the process down.
+    private volatile OverviewOverlay? _inertiaTarget;
 
     // MMCSS registration for the UI thread while the overview is open —
     // keeps WM_PAINT / mouse-message dispatch on near-realtime scheduling.
@@ -91,13 +115,29 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
         _windows = new OverviewWindowList(mainCanvas, win32);
         _thumbnails = new OverviewThumbnails(_passes, _windows, _camera, _state, _win32, _screens);
 
+        _panningWatchdog = new Timer { Interval = PanningWatchdogMs };
+        _panningWatchdog.Tick += OnPanningWatchdogTick;
+
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+
+
+        // ShowScreenFixedWindowsDuringPan is read per-use, so a config edit
+        // already affects the next overview open — but not one that is open
+        // right now. Re-apply on change so editing config.ini matches the tray
+        // toggle, which calls RefreshConfig directly.
+        appConfig.Changed += OnConfigChanged;
 
         // Reference held only to keep the binding alive for the lifetime of this manager.
         _ = new OverviewInputs(this, input, mainCanvas);
     }
 
+    private void OnConfigChanged()
+    {
+        RefreshConfig();
+    }
+
     public void RefreshConfig()
+
     {
         if (CurrentMode != OverviewMode.Hidden)
             ApplyConfig();
@@ -113,6 +153,7 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
         if (wasVisible)
             TransitionTo(OverviewMode.Hidden, syncCameraOnClose: false);
 
+        _inertiaTarget = null;
         foreach (var p in _passes)
         {
             p.Close();
@@ -169,24 +210,54 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
             pass.OnMouseDoubleClicked = HandleDoubleClick;
             _passes.Add(pass);
         }
+        _inertiaTarget = _passes.Count > 0 ? _passes[0] : null;
     }
+
 
     public void RecordPanDelta(int dx, int dy)
     {
+        // A live drag, not a glide — the user still owns the gesture.
+        _panningWatchdog.Enabled = false;
         _inertia.RecordDelta(dx, dy);
     }
 
+
     public void ReleaseInertia()
     {
-        if (!_inertia.Release() && CurrentMode != OverviewMode.Hidden)
+        if (!_inertia.Release())
         {
-            TransitionTo(OverviewMode.Hidden);
+            if (CurrentMode != OverviewMode.Hidden)
+                TransitionTo(OverviewMode.Hidden);
+            return;
         }
+
+        // Inertia took over. OnGridFrameTick normally closes the overview when
+        // the glide stops; arm the watchdog so a render thread that never
+        // reports back can't strand us in Panning.
+        if (CurrentMode == OverviewMode.Panning)
+            _panningWatchdog.Enabled = true;
     }
+
+    private void OnPanningWatchdogTick(object? sender, EventArgs e)
+    {
+        if (CurrentMode != OverviewMode.Panning)
+        {
+            _panningWatchdog.Enabled = false;
+            return;
+        }
+        if (_inertia.IsActive) return; // still gliding — let the frame tick finish
+
+        // Inertia is done but nothing closed us. Close from the UI thread.
+        _panningWatchdog.Enabled = false;
+        TransitionTo(OverviewMode.Hidden);
+    }
+
 
     public void CancelInertia()
     {
+        _panningWatchdog.Enabled = false;
         _inertia.Cancel();
+
         lock (_inertiaQueueLock)
         {
             _pendingInertiaDx = 0;
@@ -199,14 +270,17 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
     {
         var (dx, dy, stopped) = _inertia.Tick();
 
+        // Snapshot once: the UI thread can null or replace this at any point.
+        OverviewOverlay? target = _inertiaTarget;
+        if (target == null || !target.IsHandleCreated) return;
+
         if (stopped)
         {
-            if (_passes.Count > 0 && _passes[0].IsHandleCreated)
-                _passes[0].BeginInvoke(() => { if (CurrentMode != OverviewMode.Hidden) TransitionTo(OverviewMode.Hidden); });
+            PostToUi(target, () => { if (CurrentMode != OverviewMode.Hidden) TransitionTo(OverviewMode.Hidden); });
             return;
         }
 
-        if ((dx != 0 || dy != 0) && _passes.Count > 0 && _passes[0].IsHandleCreated)
+        if (dx != 0 || dy != 0)
         {
             bool queue;
             lock (_inertiaQueueLock)
@@ -219,7 +293,7 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
 
             if (queue)
             {
-                _passes[0].BeginInvoke(() =>
+                PostToUi(target, () =>
                 {
                     int cdx, cdy;
                     lock (_inertiaQueueLock)
@@ -237,7 +311,27 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
         }
     }
 
+    /// <summary>
+    /// Marshal <paramref name="action"/> onto the UI thread via <paramref name="target"/>.
+    /// Called from the grid render thread, where the form's handle can be
+    /// destroyed between the IsHandleCreated check and the post — swallow that
+    /// race rather than letting it terminate the process.
+    /// </summary>
+    private static void PostToUi(OverviewOverlay target, Action action)
+    {
+        try
+        {
+            target.BeginInvoke(action);
+        }
+        catch (InvalidOperationException)
+        {
+            // Handle destroyed while the overview was tearing down.
+            // ObjectDisposedException derives from this, so it is covered too.
+        }
+    }
+
     /// <summary>Sync overview camera to the main canvas and update visuals on all passes.</summary>
+
     public void SyncCamera()
     {
         if (CurrentMode == OverviewMode.Hidden) return;
@@ -304,6 +398,8 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
 
     private void HideInternal(bool syncCamera)
     {
+        _panningWatchdog.Enabled = false;
+
         foreach (var p in _passes)
         {
             if (p.Grid != null) p.Grid.OnFrameTick = null;
@@ -667,8 +763,7 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
         if (_mainCanvas.IsCollapsed(hWnd))
             PInvoke.ShowWindow((HWND)hWnd, SHOW_WINDOW_CMD.SW_RESTORE);
 
-        var vs = _screens.VirtualScreen;
-        _mainCanvas.CenterOn(world.X, world.Y, world.W, world.H, vs.Width, vs.Height);
+        CanvasNavigation.CenterOnWindow(_mainCanvas, _screens, world);
         PInvoke.SetForegroundWindow((HWND)hWnd);
         TransitionTo(OverviewMode.Hidden, syncCameraOnClose: false);
     }
@@ -676,9 +771,13 @@ internal sealed class OverviewManager : IDisposable, IOverviewController
     public void Dispose()
     {
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        _appConfig.Changed -= OnConfigChanged;
 
         if (CurrentMode != OverviewMode.Hidden)
             TransitionTo(OverviewMode.Hidden, syncCameraOnClose: false);
+        _inertiaTarget = null;
+        _panningWatchdog.Stop();
+        _panningWatchdog.Dispose();
         foreach (var p in _passes)
         {
             p.Close();
